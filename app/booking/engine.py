@@ -1,6 +1,6 @@
 """
-Motore locale di disponibilità e prenotazione.
-Sostituisce i webhook n8n con logica locale.
+Motore locale di disponibilità e prenotazione - versione aggiornata.
+Sostituisce i webhook n8n.
 """
 
 from __future__ import annotations
