@@ -40,14 +40,37 @@ app.include_router(web_router)
 # ============================================================
 
 def _slot_labels(slots: list) -> list[str]:
-    """Prende una lista di slot e restituisce una lista di stringhe formattate."""
+    """Prende una lista di slot e restituisce una lista di stringhe formattate in modo corretto."""
     labels = []
+    
+    # Mappatura standard ISO (Python: Monday=0, Sunday=6)
+    iso_weekdays = {
+        0: "Lunedì", 1: "Martedì", 2: "Mercoledì", 3: "Giovedì",
+        4: "Venerdì", 5: "Sabato", 6: "Domenica"
+    }
+    
+    iso_months = {
+        1: "gennaio", 2: "febbraio", 3: "marzo", 4: "aprile", 5: "maggio", 6: "giugno",
+        7: "luglio", 8: "agosto", 9: "settembre", 10: "ottobre", 11: "novembre", 12: "dicembre"
+    }
+
     for s in slots:
-        if isinstance(s, dict):
-            labels.append(s.get("label") or s.get("datetime") or str(s))
+        if isinstance(s, dict) and s.get("date") and s.get("time"):
+            try:
+                # Leggiamo la data reale estratta (es. "2026-09-11")
+                dt = datetime.strptime(s["date"][:10], "%Y-%m-%d")
+                giorno_settimana = iso_weekdays[dt.weekday()]
+                mese_str = iso_months[dt.month]
+                time_str = s["time"][:5] # Prende HH:MM
+                
+                # Generiamo la label perfetta senza sfasamenti di array esterni
+                labels.append(f"{giorno_settimana} {dt.day} {mese_str} alle {time_str}")
+            except Exception:
+                labels.append(s.get("label") or s.get("datetime") or str(s))
         else:
             labels.append(str(s))
     return labels
+
 
 
 def _build_reply_after_n8n(context: dict, decision: dict) -> str:
