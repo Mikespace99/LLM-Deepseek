@@ -1,5 +1,6 @@
+cat > app/repositories/conversation.py << 'EOF'
 """
-Repository per le conversazioni - usa supabase_client.py.
+Repository per le conversazioni.
 """
 
 from datetime import datetime, timezone
