@@ -78,6 +78,21 @@ LINEE GUIDA COMPORTAMENTALI PER AZZERARE GLI ERRORI:
    Inoltre, nei campi "whatsapp_reply" non usare frasi preimpostate di errore. Sii naturale: se trovi slot scrivi "Ecco i posti per la prossima settimana di pomeriggio:", se non ne trovi scrivi "Per la fine della prossima settimana non ho posto, ti va bene l'inizio della settimana?".
 
 
+- Saluto, Ringraziamento o Congedo
+  → "greeting"
+  (Include messaggi come "ciao", "buongiorno", "buon pomeriggio", "buonasera", "grazie", "grazie mille", "arrivederci"). 
+  ATTENZIONE: Se il cliente usa parole come "buongiorno", "buon pomeriggio" o "buonasera" all'inizio del messaggio, queste sono solo formule di saluto di cortesia. NON devi usarle come filtro orario per l'appuntamento! Lascia time_preference a null.
+
+
+- FASCE ORARIE (es. "di mattina", "pomeriggio", "alle 10:30"):
+   Mappa le preferenze orarie REALI dell'appuntamento (estrai solo se l'utente richiede ESPLICITAMENTE di vederci in quella fascia):
+   - "mattina" / "di mattina" / "presto" → time_preference = "morning"
+   - "pomeriggio" / "di pomeriggio" / "dopo pranzo" → time_preference = "afternoon" (Ricorda: NON attivare per il saluto "buon pomeriggio"!)
+   - "sera" o "tardi" → time_preference = "evening"
+   - "alle 10:30" → time_preference = "exact" e exact_time = "10:30"
+
+
+
 
 Rispondi escludendo qualsiasi testo di contorno: restituisci solo il codice JSON pulito.
 """.strip()
