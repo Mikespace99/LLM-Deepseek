@@ -400,16 +400,49 @@ async def process_messages(messages: list[dict]):
         reply_text = "Ti metto in contatto con un operatore. Un attimo di pazienza…"
 
     elif decision["action"] == "call_n8n":
+        n8n_action = decision.get("n8n_action")  # "search_availability" | "create_booking"
+        context.setdefault("booking", {})["action"] = n8n_action
+        
+        new_collected = dict(collected)
+        
+        # --- RISOLUZIONE DETERMINISTICA DEGLI SLOT (BACKEND RIGIDO) ---
+        # Il codice Python risolve in modo matematico i numeri degli slot (es. "il 3") o gli orari esatti
+        slot_number = agent_result.get("backend_action", {}).get("parameters", {}).get("slot_number")
+        exact_time = agent_result.get("backend_action", {}).get("parameters", {}).get("exact_time")
+        
+        resolved_slot = None
+        all_available_slots = (new_collected.get("last_slots") or []) + (new_collected.get("historical_slots") or [])
+        
+        if slot_number is not None:
+            try:
+                idx = int(slot_number) - 1
+                if 0 <= idx < len(new_collected.get("last_slots", [])):
+                    resolved_slot = new_collected["last_slots"][idx]
+            except (TypeError, ValueError):
+                pass
+                
+        elif exact_time:
+            wanted = str(exact_time).strip()
+            for slot in all_available_slots:
+                if slot.get("time") == wanted or wanted in slot.get("label", ""):
+                    resolved_slot = slot
+                    break
+
+        # Se il backend trova lo slot cercato dall'utente, forza l'azione a prenotazione diretta
+        if resolved_slot:
+            new_collected["selected_slot"] = resolved_slot
+            collected["selected_slot"] = resolved_slot
+            n8n_action = "create_booking"
+            decision["n8n_action"] = "create_booking"
+
         # Se dobbiamo cercare disponibilità e l'IA non ha ancora inviato un testo di attesa personalizzato
-        if decision.get("template_key") == "verifying_availability" and not decision.get("whatsapp_reply_override"):
+        if n8n_action == "search_availability" and decision.get("template_key") == "verifying_availability" and not decision.get("whatsapp_reply_override"):
             wa_info = tenant.get("info") or {}
             token = wa_info.get("access_token") or Config.WHATSAPP_TOKEN
             phone_id = wa_info.get("phone_number_id") or Config.WHATSAPP_PHONE_NUMBER_ID
             await send_whatsapp_message(phone, tpl.VERIFYING_AVAILABILITY, token, phone_id)
 
-        n8n_action = decision.get("n8n_action")  # "search_availability" | "create_booking"
-        context.setdefault("booking", {})["action"] = n8n_action
-
+        # --- ESECUZIONE MOTORE LOCALE ---
         try:
             if n8n_action == "create_booking":
                 context["booking"] = create_booking(
@@ -427,26 +460,20 @@ async def process_messages(messages: list[dict]):
                 )
         except Exception as e:
             print(f"[main] Errore critico nel motore di prenotazione locale: {e}")
-            context.setdefault("booking", {})["result"] = {
-                "success": False,
-                "error": str(e),
-            }
+            context.setdefault("booking", {})["result"] = {"success": False, "error": str(e)}
 
-        # Genera la risposta post-azione feriale/motore
+        # Genera la risposta post-azione unendo l'intro dell'IA con la lista reale del codice
         reply_text = _build_reply_after_n8n(context, decision)
 
         booking = context.get("booking") or {}
         if booking:
-            new_collected = dict(collected)
-            
-            # --- LOGICA MEMORIA STORICA SLOT PER RIPENSAMENTI ---
+            # Accumuliamo gli slot storici per gestire i ripensamenti dell'utente
             if new_collected.get("last_slots"):
                 historical = new_collected.get("historical_slots") or []
                 for old_slot in new_collected["last_slots"]:
                     if old_slot not in historical:
                         historical.append(old_slot)
-                new_collected["historical_slots"] = historical[-15:]  # Conserva gli ultimi 15 slot
-            # --- FINE LOGICA MEMORIA STORICA ---
+                new_collected["historical_slots"] = historical[-15:]
 
             if booking.get("candidate_slots"):
                 new_collected["last_slots"] = booking["candidate_slots"]
@@ -456,39 +483,7 @@ async def process_messages(messages: list[dict]):
                 result = booking["result"]
                 new_collected["last_booking_result"] = result
                 if result.get("no_slots"):
-                    new_collected["no_slots_state"] = (
-                        "offer_widen" if result.get("search_was_narrow") else "offer_operator"
-                    )
-                    new_collected.pop("last_slots", None)
-                else:
-                    new_collected.pop("no_slots_state", None)
-
-            update_conversation(
-                conversation["id"],
-                collected_data=new_collected,
-                step=decision["step"],
-            )
-            context["collected_data"] = new_collected
-            conversation["collected_data"] = new_collected
-
-
-        # Genera la risposta post-azione feriale/motore
-        reply_text = _build_reply_after_n8n(context, decision)
-
-        booking = context.get("booking") or {}
-        if booking:
-            new_collected = dict(collected)
-            if booking.get("candidate_slots"):
-                new_collected["last_slots"] = booking["candidate_slots"]
-            if booking.get("selected_slot"):
-                new_collected["selected_slot"] = booking["selected_slot"]
-            if booking.get("result"):
-                result = booking["result"]
-                new_collected["last_booking_result"] = result
-                if result.get("no_slots"):
-                    new_collected["no_slots_state"] = (
-                        "offer_widen" if result.get("search_was_narrow") else "offer_operator"
-                    )
+                    new_collected["no_slots_state"] = "offer_widen" if result.get("search_was_narrow") else "offer_operator"
                     new_collected.pop("last_slots", None)
                 else:
                     new_collected.pop("no_slots_state", None)
@@ -502,7 +497,7 @@ async def process_messages(messages: list[dict]):
             conversation["collected_data"] = new_collected
 
     else:
-        # Se non ci sono azioni tecniche, risolve l'override fluido dell'IA o i vecchi template statici
+        # Se non ci sono azioni tecniche, risolve la risposta di cortesia dell'IA o i vecchi template statici
         reply_text = _resolve_template(decision, context)
 
     # 10. Invia risposta finale su WhatsApp
