@@ -236,4 +236,3 @@ A presto! 👋"""
         append_message(conversation["id"], "assistant", reply, conversation.get("recent_messages", []))
 
     print("=== DONE ===")
-EOF
