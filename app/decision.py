@@ -55,19 +55,25 @@ def decide(agent_result: dict, conversation: dict) -> dict:
 
     # 3. Allineamento del dizionario 'collected_data' in base alle istruzioni dell'IA
     # Gestione dell'azione: RICERCA DISPONIBILITÀ
+        # Gestione dell'azione: RICERCA DISPONIBILITÀ (In decision.py)
     if command == N8N_ACTION_SEARCH_AVAILABILITY:
         updated["slot_context_status"] = "searching"
         updated["last_slots"] = []  # Svuota i vecchi slot per la nuova ricerca
         
-        # Sostituzione universale delle preferenze con quelle calcolate dall'IA
+        # SOSTITUZIONE RADICALE DELLE PREFERENZE:
+        # Cancelliamo qualsiasi rimasuglio di 'period', 'date' o 'weekday' del passato
+        # per costringere il motore locale a leggere SOLO il range esatto dell'IA.
         updated["preferences"] = {
             "date_from": parameters.get("date_from"),
             "date_to": parameters.get("date_to"),
             "time_preference": parameters.get("time_preference"),
             "exact_time": parameters.get("exact_time"),
+            
+            # Forziamo a None le chiavi legacy che ingannavano gli if/elif del motore locale
             "date": None,
             "period": None,
-            "weekday": None
+            "weekday": None,
+            "ignore_preferences": None
         }
         
         # Manteniamo il servizio attivo estratto o preesistente
