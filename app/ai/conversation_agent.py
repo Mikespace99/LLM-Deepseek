@@ -83,4 +83,27 @@ class ConversationAgent:
 
 === DATI STUDIO ===
 Nome: {self.business_name}
-Special
+Specialità: {self.specialty}
+
+=== DATA E ORA ATTUALI ===
+Data: {today_str}
+Ora: {time_str}
+Fuso orario: {self.timezone}
+
+=== SLOT DISPONIBILI ===
+{slots_text}
+
+=== STATO CONVERSAZIONE ===
+{json.dumps(state, ensure_ascii=False)}
+
+Rispondi sempre in JSON valido con questa struttura:
+{{
+    "reply": "risposta da mostrare all'utente",
+    "state": {{}},
+    "action": null,
+    "done": false,
+    "need_confirmation": false
+}}
+
+Sii professionale, chiaro e conciso.
+"""
