@@ -51,22 +51,21 @@ def _slot_labels(slots: list) -> list[str]:
 
 
 def _build_reply_after_n8n(context: dict, decision: dict) -> str:
-    """Costruisce la risposta testuale dopo l'interrogazione ad n8n o motore locale."""
-    # Se l'IA ha generato un testo specifico di riepilogo o risposta per questa azione,
-    # lo usiamo prioritariamente per evitare testi rigidi del template feriale.
-    if decision.get("whatsapp_reply_override"):
-        return decision["whatsapp_reply_override"]
-
+    """Costruisce la risposta testuale dopo l'interrogazione al motore locale."""
     booking = context.get("booking") or {}
     slots = booking.get("candidate_slots") or []
     result = booking.get("result") or {}
     n8n_action = decision.get("n8n_action")
 
+    # Applichiamo l'override dell'IA solo ed esclusivamente alla creazione finale
     if n8n_action == "create_booking":
+        if decision.get("whatsapp_reply_override"):
+            return decision["whatsapp_reply_override"]
         if result.get("success"):
             return tpl.BOOKING_CONFIRMED
         return tpl.BOOKING_FAILED
 
+    # Se l'azione è "search_availability", usiamo i dati reali del motore locale!
     if slots:
         labels = _slot_labels(slots)
         intro = None
@@ -85,6 +84,7 @@ def _build_reply_after_n8n(context: dict, decision: dict) -> str:
     if result.get("error"):
         return "Si è verificato un problema tecnico. Riprova tra poco oppure scrivi 'operatore'."
     return tpl.NO_SLOTS_FOUND
+
 
 
 def _resolve_template(decision: dict, context: dict) -> str:
