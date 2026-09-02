@@ -1,8 +1,3 @@
-cat > app/main.py << 'EOF'
-"""
-Backend WhatsApp AI - Versione 2.0 con ConversationAgent.
-"""
-
 import hashlib
 import hmac
 import json
