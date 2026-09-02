@@ -84,4 +84,3 @@ def close_conversation(conversation_id: str, reason: str = "expired") -> None:
         "closed_at": datetime.now(timezone.utc).isoformat(),
         "close_reason": reason,
     }).eq("id", conversation_id).execute()
-EOF
