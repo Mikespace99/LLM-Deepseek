@@ -1,7 +1,6 @@
 """
 Logica di decisione del Backend (AI-Driven Mode).
-
-Prende le decisioni operative strutturate dall'Agente Centrale (AI)
+Prende le decisioni operative strutturate dall'Agente centrale (AI)
 ed esegue l'aggiornamento dei dati raccolti e l'attivazione dei comandi tecnici.
 """
 
@@ -16,29 +15,6 @@ from app.constants import (
 def decide(agent_result: dict, conversation: dict) -> dict:
     """
     Esegue le direttive strutturate emesse dall'Agente AI.
-
-    Riceve agent_result:
-    {
-       "whatsapp_reply": str,
-       "new_workflow": str,
-       "new_step": str,
-       "backend_action": {"command": str|None, "parameters": dict},
-       "notes": str
-    }
-
-    Ritorna il formato standard per la pipeline principale:
-    {
-        "workflow": str,
-        "step": str,
-        "action": str,
-        "template_key": str | None,
-        "is_lateral": bool,
-        "change_workflow": bool,
-        "message_hint": str | None,
-        "updated_collected": dict,
-        "n8n_action": str | None,
-        "whatsapp_reply_override": str | None  # Veicola la risposta generata dall'IA
-    }
     """
     # 1. Recupero degli stati decisi dall'IA
     new_workflow = agent_result.get("new_workflow", WORKFLOW_IDLE)
@@ -54,33 +30,29 @@ def decide(agent_result: dict, conversation: dict) -> dict:
     updated = deepcopy(collected)
 
     # 3. Allineamento del dizionario 'collected_data' in base alle istruzioni dell'IA
-    # Gestione dell'azione: RICERCA DISPONIBILITÀ
-        # Gestione dell'azione: RICERCA DISPONIBILITÀ (In decision.py)
+    # CASO A: RICERCA DISPONIBILITÀ (Con pulizia radicale dei vecchi rimasugli)
     if command == N8N_ACTION_SEARCH_AVAILABILITY:
         updated["slot_context_status"] = "searching"
         updated["last_slots"] = []  # Svuota i vecchi slot per la nuova ricerca
         
-        # SOSTITUZIONE RADICALE DELLE PREFERENZE:
-        # Cancelliamo qualsiasi rimasuglio di 'period', 'date' o 'weekday' del passato
-        # per costringere il motore locale a leggere SOLO il range esatto dell'IA.
+        # Sovrascriviamo interamente le preferenze per evitare che vecchi "period" sporchino il motore locale
         updated["preferences"] = {
             "date_from": parameters.get("date_from"),
             "date_to": parameters.get("date_to"),
             "time_preference": parameters.get("time_preference"),
             "exact_time": parameters.get("exact_time"),
             
-            # Forziamo a None le chiavi legacy che ingannavano gli if/elif del motore locale
+            # Azzeriamo le chiavi legacy che ingannavano gli if/elif del motore locale
             "date": None,
             "period": None,
             "weekday": None,
             "ignore_preferences": None
         }
         
-        # Manteniamo il servizio attivo estratto o preesistente
         if parameters.get("service"):
             updated["service"] = parameters.get("service")
 
-    # Gestione dell'azione: CONFERMA E CREAZIONE PRENOTAZIONE
+    # CASO B: CONFERMA E CREAZIONE PRENOTAZIONE
     elif command == N8N_ACTION_CREATE_BOOKING:
         if parameters.get("person_name"):
             updated["person_name"] = parameters.get("person_name")
@@ -88,9 +60,8 @@ def decide(agent_result: dict, conversation: dict) -> dict:
             updated["selected_slot"] = parameters.get("selected_slot")
         updated["slot_context_status"] = "completed"
 
-    # Nessun comando esplicito (es. Chiarimenti sui conflitti o Saluto finale)
+    # CASO C: NESSUNA AZIONE TECNICA (Conversazione fluida, saluti o Abbandono)
     else:
-        # Se l'IA rileva un'estrazione parziale o una correzione durante il flusso, aggiorna i dati
         if parameters.get("service"):
             updated["service"] = parameters.get("service")
         if parameters.get("person_name"):
@@ -100,11 +71,12 @@ def decide(agent_result: dict, conversation: dict) -> dict:
         if parameters.get("selected_time"):
             updated["selected_time"] = parameters.get("selected_time")
             
-        # Se l'IA ha decretato il ritorno a IDLE (es. Ringraziamenti finali), svuota la memoria
+        # Se l'IA ha deciso di tornare in IDLE (Abbandono o Ringraziamento finale),
+        # puliamo i filtri di ricerca ma non distruggiamo l'oggetto per non interrompere il thread di main.py
         if new_workflow == WORKFLOW_IDLE and new_step == STEP_NONE:
-            updated = {}
+            updated = {"status": "reset_completed"}
 
-    # 4. Costruzione del dizionario di decisione per la pipeline
+    # 4. Costruzione del dizionario di decisione universale per la pipeline
     action_type = "call_n8n" if command else "reply_template"
     
     decision = {
@@ -117,7 +89,7 @@ def decide(agent_result: dict, conversation: dict) -> dict:
         "message_hint": None,
         "updated_collected": updated,
         "n8n_action": command,
-        "whatsapp_reply_override": whatsapp_reply  # Campo chiave che main.py userà per inviare il testo dell'IA
+        "whatsapp_reply_override": whatsapp_reply if whatsapp_reply else "Operazione completata."
     }
 
     return decision
