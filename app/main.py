@@ -415,6 +415,46 @@ async def process_messages(messages: list[dict]):
         booking = context.get("booking") or {}
         if booking:
             new_collected = dict(collected)
+            
+            # --- LOGICA MEMORIA STORICA SLOT PER RIPENSAMENTI ---
+            if new_collected.get("last_slots"):
+                historical = new_collected.get("historical_slots") or []
+                for old_slot in new_collected["last_slots"]:
+                    if old_slot not in historical:
+                        historical.append(old_slot)
+                new_collected["historical_slots"] = historical[-15:]  # Conserva gli ultimi 15 slot
+            # --- FINE LOGICA MEMORIA STORICA ---
+
+            if booking.get("candidate_slots"):
+                new_collected["last_slots"] = booking["candidate_slots"]
+            if booking.get("selected_slot"):
+                new_collected["selected_slot"] = booking["selected_slot"]
+            if booking.get("result"):
+                result = booking["result"]
+                new_collected["last_booking_result"] = result
+                if result.get("no_slots"):
+                    new_collected["no_slots_state"] = (
+                        "offer_widen" if result.get("search_was_narrow") else "offer_operator"
+                    )
+                    new_collected.pop("last_slots", None)
+                else:
+                    new_collected.pop("no_slots_state", None)
+
+            update_conversation(
+                conversation["id"],
+                collected_data=new_collected,
+                step=decision["step"],
+            )
+            context["collected_data"] = new_collected
+            conversation["collected_data"] = new_collected
+
+
+        # Genera la risposta post-azione feriale/motore
+        reply_text = _build_reply_after_n8n(context, decision)
+
+        booking = context.get("booking") or {}
+        if booking:
+            new_collected = dict(collected)
             if booking.get("candidate_slots"):
                 new_collected["last_slots"] = booking["candidate_slots"]
             if booking.get("selected_slot"):
