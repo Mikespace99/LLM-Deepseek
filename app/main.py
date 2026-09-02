@@ -51,40 +51,41 @@ def _slot_labels(slots: list) -> list[str]:
 
 
 def _build_reply_after_n8n(context: dict, decision: dict) -> str:
-    """Costruisce la risposta testuale dopo l'interrogazione al motore locale."""
+    """Costruisce la risposta testuale unendo l'intelligenza dell'IA con gli slot reali del DB."""
     booking = context.get("booking") or {}
     slots = booking.get("candidate_slots") or []
     result = booking.get("result") or {}
     n8n_action = decision.get("n8n_action")
+    ai_reply = decision.get("whatsapp_reply_override")
 
-    # Applichiamo l'override dell'IA solo ed esclusivamente alla creazione finale
+    # Caso Creazione Prenotazione
     if n8n_action == "create_booking":
-        if decision.get("whatsapp_reply_override"):
-            return decision["whatsapp_reply_override"]
-        if result.get("success"):
-            return tpl.BOOKING_CONFIRMED
-        return tpl.BOOKING_FAILED
+        if ai_reply:
+            return ai_reply
+        return tpl.BOOKING_CONFIRMED if result.get("success") else tpl.BOOKING_FAILED
 
-    # Se l'azione è "search_availability", usiamo i dati reali del motore locale!
+    # Caso Ricerca Slot (search_availability)
     if slots:
         labels = _slot_labels(slots)
-        intro = None
-        if booking.get("matched_preferences") is False:
-            prefs = context.get("collected_data") or {}
-            time_pref = (prefs.get("preferences") or {}).get("time_preference")
-            intro = tpl.preference_mismatch_intro(time_pref)
-        return tpl.showing_slots(labels, intro=intro)
+        # Costruiamo la lista numerata in modo pulito
+        slots_text = "\n".join(f"{i+1}. {label}" for i, label in enumerate(labels))
+        
+        # Se l'IA ha generato un testo empatico (es. "Ecco i posti per la settimana prossima:"), usiamo quello come intro!
+        if ai_reply and "Non ho trovato" not in ai_reply:
+            return f"{ai_reply}\n\n{slots_text}\n\nQuale preferisci? (puoi rispondere con il numero o con l'orario)"
+        
+        # Altrimenti testo standard lineare senza dire "Non ho trovato come richiesto"
+        return f"Ecco le disponibilità trovate:\n\n{slots_text}\n\nQuale preferisci? (puoi rispondere con il numero o con l'orario)"
 
-    if result.get("no_slots"):
-        if result.get("search_was_narrow"):
-            days = (context.get("tenant") or {}).get("slot_search_days") or 30
-            return tpl.no_slots_narrow(days)
-        return tpl.NO_SLOTS_WIDE
-
-    if result.get("error"):
-        return "Si è verificato un problema tecnico. Riprova tra poco oppure scrivi 'operatore'."
+    # Caso in cui NON ci sono slot
+    if ai_reply: 
+        return ai_reply  # Lasciamo che l'IA spieghi in modo umano perché non c'è posto e cosa fare
+        
+    if result.get("no_slots") and result.get("search_was_narrow"):
+        days = (context.get("tenant") or {}).get("slot_search_days") or 30
+        return tpl.no_slots_narrow(days)
+        
     return tpl.NO_SLOTS_FOUND
-
 
 
 def _resolve_template(decision: dict, context: dict) -> str:
