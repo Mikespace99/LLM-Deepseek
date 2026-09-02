@@ -1,244 +1,219 @@
 """
-Backend WhatsApp AI - Versione 2.0 con ConversationAgent.
+Agente conversazionale unificato con LLM.
+Gestisce intent, stato, e risposta in un unico passaggio.
 """
 
-import hashlib
-import hmac
 import json
-from datetime import datetime, timezone
-from fastapi import FastAPI, Request
-from fastapi.responses import PlainTextResponse
+from datetime import datetime
+from zoneinfo import ZoneInfo
+from openai import OpenAI
 
 from app.config import Config
-from app.repositories.tenant import get_tenant_by_whatsapp_number, get_tenant_knowledge
-from app.repositories.customer import get_or_create_customer
-from app.repositories.conversation import get_or_create_conversation, update_conversation, append_message
-from app.ai.conversation_agent import ConversationAgent
-from app.state.manager import StateManager
-from app.booking.engine_adapter import search_and_update_state, create_and_update_state
-from app.integrations.whatsapp import send_whatsapp_message
-from app.message_buffer import message_buffer
-from app.web.routes import router as web_router
 
-app = FastAPI(title="AI Booking V2", version="2.0.0")
-app.include_router(web_router)
+client = OpenAI(api_key=Config.OPENAI_API_KEY)
 
 
-# ============================================================
-# HEALTH
-# ============================================================
+class ConversationAgent:
+    def __init__(self, tenant: dict, knowledge: dict):
+        self.tenant = tenant
+        self.knowledge = knowledge
+        self.timezone = tenant.get("timezone", "Europe/Rome")
+        self.business_name = tenant.get("business_name", "Studio")
+        self.specialty = tenant.get("specialty", "")
 
-@app.get("/health")
-def health():
-    return {"status": "ok", "version": "2.0.0"}
+    def process(self, context: dict) -> dict:
+        if context.get("slots_found"):
+            search_result = context.get("search_result", {})
+            slots = search_result.get("candidate_slots", [])
+            state = context.get("state", {})
+            state["slots_shown"] = slots
+            state["step"] = "showing_slots" if slots else "no_slots"
+            context["state"] = state
 
+        if context.get("booking_result"):
+            booking_result = context.get("booking_result", {})
+            if booking_result.get("result", {}).get("success"):
+                state = context.get("state", {})
+                state["step"] = "completed"
+                state["conversation_ended"] = True
+                context["state"] = state
 
-# ============================================================
-# WHATSAPP WEBHOOK VERIFICATION
-# ============================================================
+        system_prompt = self._build_system_prompt(context)
+        user_prompt = self._build_user_prompt(context)
 
-@app.get("/webhook/whatsapp")
-async def verify_whatsapp(request: Request):
-    params = request.query_params
-    mode = params.get("hub.mode")
-    token = params.get("hub.verify_token")
-    challenge = params.get("hub.challenge")
-    if mode == "subscribe" and token == Config.WHATSAPP_VERIFY_TOKEN:
-        return PlainTextResponse(challenge or "")
-    return PlainTextResponse("Forbidden", status_code=403)
+        try:
+            response = client.chat.completions.create(
+                model=Config.AI_MODEL_RESPONSE,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.2,
+                response_format={"type": "json_object"}
+            )
+            raw = response.choices[0].message.content
+            result = json.loads(raw)
+            return {
+                "reply": result.get("reply", "Non ho capito, puoi ripetere?"),
+                "state": result.get("state", context.get("state", {})),
+                "action": result.get("action"),
+                "done": result.get("done", False),
+                "need_confirmation": result.get("need_confirmation", False),
+            }
+        except Exception as e:
+            print(f"[ConversationAgent] Errore: {e}")
+            return {
+                "reply": "Mi dispiace, ho avuto un problema. Puoi ripetere?",
+                "state": context.get("state", {}),
+                "action": None,
+                "done": False,
+                "need_confirmation": False,
+            }
 
+    def _build_system_prompt(self, context: dict) -> str:
+        now = datetime.now(ZoneInfo(self.timezone))
+        today_str = now.strftime("%A %d %B %Y")
+        time_str = now.strftime("%H:%M")
 
-# ============================================================
-# WHATSAPP MESSAGE WEBHOOK
-# ============================================================
+        state = context.get("state", {})
+        slots_shown = state.get("slots_shown", [])
+        slots_text = self._format_slots(slots_shown) if slots_shown else "Nessuno slot mostrato al momento."
 
-def _verify_meta_signature(raw_body: bytes, signature_header: str | None, app_secret: str) -> bool:
-    if not signature_header or not signature_header.startswith("sha256="):
-        return False
-    expected = hmac.new(app_secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
-    received = signature_header.split("=", 1)[1]
-    return hmac.compare_digest(expected, received)
+        return f"""Sei un assistente di prenotazione professionale.
 
+=== DATI STUDIO ===
+Nome: {self.business_name}
+Specialità: {self.specialty or "Consulenza professionale"}
 
-@app.post("/webhook/whatsapp")
-async def whatsapp_webhook(request: Request):
-    raw_body = await request.body()
+ORARI:
+{self._format_working_hours()}
 
-    if Config.WHATSAPP_APP_SECRET:
-        signature_header = request.headers.get("x-hub-signature-256")
-        if not _verify_meta_signature(raw_body, signature_header, Config.WHATSAPP_APP_SECRET):
-            print("--- WEBHOOK RIFIUTATO: firma non valida ---")
-            return PlainTextResponse("Forbidden", status_code=403)
+SERVIZI:
+{self._format_services()}
 
-    payload = json.loads(raw_body)
-    print("--- WEBHOOK RICEVUTO ---", payload)
+SEDI:
+{self._format_locations()}
 
-    message = _extract_message(payload)
-    if not message:
-        return {"status": "ignored"}
+=== DATA E ORA ===
+Oggi è {today_str}, ora {time_str}
 
-    await message_buffer.add_message(message["from"], message, process_messages)
-    return {"status": "accepted"}
+=== SLOT MOSTRATI ===
+{slots_text}
 
+=== REGOLE ===
+1. Sii naturale, cordiale e professionale.
+2. Aggiorna lo stato JSON con le informazioni raccolte.
+3. Se l'utente corregge un dato, SOVRASCRIVILO.
+4. Prima di finalizzare, chiedi SEMPRE conferma esplicita.
+5. Se l'utente saluta dopo conferma, chiudi la conversazione.
 
-def _extract_message(payload: dict) -> dict | None:
-    try:
-        entry = payload["entry"][0]
-        change = entry["changes"][0]
-        value = change["value"]
-        messages = value.get("messages")
-        if not messages:
-            return None
-        msg = messages[0]
-        if msg.get("type") != "text":
-            return None
-        metadata = value.get("metadata", {})
-        ts = msg.get("timestamp")
-        received_at = (
-            datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
-            if ts else datetime.now(timezone.utc).isoformat()
-        )
-        return {
-            "to": metadata.get("display_phone_number"),
-            "from": msg.get("from"),
-            "message": msg["text"]["body"],
-            "message_id": msg.get("id"),
-            "received_at": received_at,
-        }
-    except (KeyError, IndexError, TypeError):
-        return None
+=== STRUTTURA STATO ===
+{{
+  "service": "nome servizio o null",
+  "person_name": "nome cliente o null",
+  "preferences": {{
+    "date": "YYYY-MM-DD o null",
+    "time": "HH:MM o null",
+    "period": "today|tomorrow|this_week|next_week o null",
+    "time_preference": "morning|afternoon|evening o null"
+  }},
+  "selected_slot": {{
+    "datetime": "ISO datetime",
+    "date": "YYYY-MM-DD",
+    "time": "HH:MM",
+    "label": "descrizione"
+  }} o null,
+  "step": "greeting|collecting_info|showing_slots|confirming|completed|no_slots",
+  "slots_shown": [],
+  "conversation_ended": false
+}}
 
+=== AZIONI ===
+- "search_availability": quando hai servizio + data/ora per cercare slot
+- "create_booking": quando l'utente ha confermato tutti i dati
+- "request_human": quando l'utente chiede un operatore
 
-# ============================================================
-# PIPELINE PRINCIPALE
-# ============================================================
+=== CORREZIONI ORARIO ===
+Esempio: utente dice "Il 4 alle 15:30" poi "Alle 15 sarebbe meglio"
+- Trova lo slot alle 15:00 in slots_shown
+- SOSTITUISCI selected_slot con quello
+- Chiedi conferma: "Quindi confermi Lunedì 7 alle 15:00?"
 
-async def process_messages(messages: list[dict]):
-    if not messages:
-        return
+=== SALUTI FINALI ===
+Dopo conferma, utente dice "Ok grazie"
+- conversation_ended = true
+- Rispondi con saluto e riepilogo
 
-    last = messages[-1]
-    phone = last["from"]
-    business_phone = last["to"]
-    combined_text = "\n".join(m["message"].strip() for m in messages if m.get("message"))
+Rispondi SEMPRE in italiano.
+Restituisci SEMPRE JSON con: reply, state, action, done, need_confirmation.
+"""
 
-    print(f"=== PROCESS {len(messages)} MSG da {phone} ===")
-    print(combined_text)
+    def _build_user_prompt(self, context: dict) -> str:
+        state = context.get("state", {})
+        history = context.get("recent_messages", [])
+        current_message = context.get("message", "")
+        slots_found = context.get("slots_found", False)
 
-    # 1. Tenant
-    tenant = get_tenant_by_whatsapp_number(business_phone)
-    if not tenant:
-        print("Tenant non trovato per numero:", business_phone)
-        return
+        history_text = ""
+        for msg in history[-6:]:
+            role = "Cliente" if msg.get("role") == "user" else "Assistente"
+            content = msg.get("content", "")
+            history_text += f"{role}: {content}\n"
 
-    # 2. Customer
-    customer = get_or_create_customer(tenant["id"], phone)
+        status_text = ""
+        if slots_found:
+            status_text = "\n⚠️ ATTENZIONE: Sono stati appena trovati nuovi slot. Mostrali all'utente e chiedi quale preferisce.\n"
 
-    # 3. Conversazione
-    conversation, expired = get_or_create_conversation(tenant["id"], customer["id"], phone)
+        return f"""{status_text}
+=== STATO ATTUALE ===
+{json.dumps(state, indent=2, ensure_ascii=False)}
 
-    # 4. Aggiorna storico
-    recent = conversation.get("recent_messages") or []
-    for m in messages:
-        recent = append_message(conversation["id"], "user", m["message"], recent)
-    conversation["recent_messages"] = recent
+=== STORIA RECENTE ===
+{history_text}
 
-    # 5. Knowledge
-    knowledge = get_tenant_knowledge(tenant["id"])
+=== MESSAGGIO ATTUALE ===
+{current_message}
 
-    # 6. Conversazione scaduta
-    if expired:
-        wa_info = tenant.get("info") or {}
-        token = wa_info.get("access_token") or Config.WHATSAPP_TOKEN
-        phone_id = wa_info.get("phone_number_id") or Config.WHATSAPP_PHONE_NUMBER_ID
-        reply = "⏰ La conversazione precedente è scaduta. Ricominciamo da capo. Cosa ti serve?"
-        await send_whatsapp_message(phone, reply, token, phone_id)
-        append_message(conversation["id"], "assistant", reply, recent)
-        update_conversation(
-            conversation["id"],
-            workflow="idle",
-            step="none",
-            state=StateManager.initial_state(),
-            collected_data={},
-        )
-        return
+=== ISTRUZIONI ===
+Analizza il messaggio, aggiorna lo stato se necessario, e rispondi.
+Se l'utente ha scelto uno slot, imposta selected_slot.
+Se l'utente ha confermato, imposta action = "create_booking".
+Se l'utente ha chiesto un operatore, imposta action = "request_human".
+Se il messaggio è un saluto dopo conferma, conversation_ended = true.
 
-    # 7. Stato
-    state = conversation.get("state") or StateManager.initial_state()
+Restituisci SOLO il JSON richiesto.
+"""
 
-    # 8. Agente
-    agent = ConversationAgent(tenant, knowledge)
+    def _format_working_hours(self) -> str:
+        hours = self.knowledge.get("working_hours", [])
+        if not hours:
+            return "Lun-Ven 9:00-18:00"
+        days = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"]
+        lines = []
+        for h in hours:
+            dow = int(h.get("day_of_week", 0))
+            start = h.get("start_time", "")[:5]
+            end = h.get("end_time", "")[:5]
+            lines.append(f"{days[dow-1]}: {start}-{end}")
+        return "\n".join(lines) if lines else "Orari non specificati"
 
-    # 9. Contesto
-    context = {
-        "state": state,
-        "recent_messages": conversation.get("recent_messages", []),
-        "message": combined_text,
-        "slots_found": False,
-        "search_result": None,
-        "booking_result": None,
-    }
+    def _format_services(self) -> str:
+        services = self.knowledge.get("services", [])
+        if not services:
+            return "Consulenza professionale"
+        return "\n".join(f"- {s.get('name')}" for s in services)
 
-    # 10. Processa
-    result = agent.process(context)
-    new_state = StateManager.merge(state, result["state"])
-    reply = result["reply"]
-    action = result.get("action")
+    def _format_locations(self) -> str:
+        locations = self.knowledge.get("locations", [])
+        if not locations:
+            return "Sede principale"
+        return "\n".join(f"- {l.get('name')}" for l in locations)
 
-    # 11. Azioni
-    wa_info = tenant.get("info") or {}
-    token = wa_info.get("access_token") or Config.WHATSAPP_TOKEN
-    phone_id = wa_info.get("phone_number_id") or Config.WHATSAPP_PHONE_NUMBER_ID
-
-    if action == "search_availability":
-        await send_whatsapp_message(phone, "🔍 Verifico la disponibilità... un attimo.", token, phone_id)
-        new_state, search_result = search_and_update_state(tenant, knowledge, new_state)
-        context["state"] = new_state
-        context["slots_found"] = True
-        context["search_result"] = search_result
-        result2 = agent.process(context)
-        reply = result2["reply"]
-        new_state = StateManager.merge(new_state, result2["state"])
-
-    elif action == "create_booking":
-        new_state, booking_result = create_and_update_state(tenant, knowledge, new_state, customer, phone)
-        if booking_result.get("result", {}).get("success"):
-            slot = new_state.get("selected_slot", {})
-            reply = f"""✅ Appuntamento confermato!
-
-📋 Servizio: {new_state.get('service', '—')}
-👤 Nome: {new_state.get('person_name', '—')}
-📅 Data: {slot.get('date', '—') if slot else '—'}
-🕐 Ora: {slot.get('time', '—') if slot else '—'}
-
-A presto! 👋"""
-        else:
-            reply = "❌ Non è stato possibile confermare. Vuoi provare con un altro orario?"
-            new_state["step"] = "showing_slots"
-
-    elif action == "request_human":
-        reply = "👤 Ti metto in contatto con un operatore. Un attimo..."
-
-    # 12. Salva
-    if new_state.get("conversation_ended"):
-        workflow = "idle"
-        step = "none"
-        new_state["conversation_ended"] = False
-    else:
-        workflow = "booking"
-        step = new_state.get("step", "collecting_info")
-
-    update_conversation(
-        conversation["id"],
-        workflow=workflow,
-        step=step,
-        state=new_state,
-        collected_data=StateManager.extract_collected_data(new_state),
-    )
-
-    # 13. Invia risposta
-    if reply:
-        await send_whatsapp_message(phone, reply, token, phone_id)
-        append_message(conversation["id"], "assistant", reply, conversation.get("recent_messages", []))
-
-    print("=== DONE ===")
+    def _format_slots(self, slots: list) -> str:
+        if not slots:
+            return "Nessuno slot disponibile al momento."
+        lines = []
+        for i, slot in enumerate(slots, 1):
+            label = slot.get("label", f"Slot {i}")
+            lines.append(f"{i}. {label}")
+        return "\n".join(lines)
