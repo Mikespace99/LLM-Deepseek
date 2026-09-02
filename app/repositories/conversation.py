@@ -1,4 +1,3 @@
-cat > app/repositories/conversation.py << 'EOF'
 """
 Repository per le conversazioni.
 Stile identico a appointment.py.
