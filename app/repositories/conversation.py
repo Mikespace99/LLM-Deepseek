@@ -1,33 +1,102 @@
-import os
-from dotenv import load_dotenv
+"""
+Repository per le conversazioni - con supporto colonna state.
+"""
 
-load_dotenv()
+from datetime import datetime, timedelta, timezone
+from app.repositories.supabase import get_supabase_client
+from app.state.manager import StateManager
 
 
-class Config:
-    # Supabase
-    SUPABASE_URL = os.getenv("SUPABASE_URL")
-    SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+def get_or_create_conversation(tenant_id: str, customer_id: str, phone_number: str) -> tuple[dict, bool]:
+    """Recupera o crea una conversazione, includendo il campo state."""
+    supabase = get_supabase_client()
 
-    # OpenAI
-    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-    AI_MODEL_INTENT = os.getenv("AI_MODEL_INTENT", "gpt-4o-mini")
-    AI_MODEL_RESPONSE = os.getenv("AI_MODEL_RESPONSE", "gpt-4o-mini")
+    result = supabase.table("conversations").select("*").eq(
+        "tenant_id", tenant_id
+    ).eq("customer_id", customer_id).eq(
+        "status", "active"
+    ).order("created_at", desc=True).limit(1).execute()
 
-    # WhatsApp
-    WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
-    WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
-    WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
-    WHATSAPP_APP_SECRET = os.getenv("WHATSAPP_APP_SECRET")
+    if result.data:
+        conv = result.data[0]
+        if "state" not in conv or not conv["state"]:
+            conv["state"] = StateManager.initial_state()
+        expired = _check_expired(conv)
+        if expired:
+            close_conversation(conv["id"], "expired")
+            return _create_conversation(tenant_id, customer_id, phone_number), True
+        return conv, False
 
-    # n8n webhooks (solo per compatibilità, non più usati)
-    N8N_BOOKING_WEBHOOK = os.getenv("N8N_BOOKING_WEBHOOK")
-    N8N_RESCHEDULE_WEBHOOK = os.getenv("N8N_RESCHEDULE_WEBHOOK")
-    N8N_CANCEL_WEBHOOK = os.getenv("N8N_CANCEL_WEBHOOK")
-    N8N_AVAILABILITY_WEBHOOK = os.getenv("N8N_AVAILABILITY_WEBHOOK")
+    return _create_conversation(tenant_id, customer_id, phone_number), False
 
-    # Business rules
-    DEFAULT_SLOT_SEARCH_DAYS = int(os.getenv("DEFAULT_SLOT_SEARCH_DAYS", "30"))
-    CONVERSATION_TIMEOUT_MINUTES = int(os.getenv("CONVERSATION_TIMEOUT_MINUTES", "15"))
-    MAX_RECENT_MESSAGES = int(os.getenv("MAX_RECENT_MESSAGES", "6"))
-    MESSAGE_DEBOUNCE_SECONDS = float(os.getenv("MESSAGE_DEBOUNCE_SECONDS", "10"))
+
+def _create_conversation(tenant_id: str, customer_id: str, phone_number: str) -> dict:
+    supabase = get_supabase_client()
+    result = supabase.table("conversations").insert({
+        "tenant_id": tenant_id,
+        "customer_id": customer_id,
+        "phone_number": phone_number,
+        "status": "active",
+        "workflow": "idle",
+        "step": "none",
+        "state": StateManager.initial_state(),
+        "collected_data": {},
+        "recent_messages": [],
+        "last_message_at": datetime.now(timezone.utc).isoformat(),
+    }).execute()
+    return result.data[0]
+
+
+def _check_expired(conversation: dict) -> bool:
+    from app.config import Config
+    timeout_minutes = Config.CONVERSATION_TIMEOUT_MINUTES
+    last_at = conversation.get("last_message_at")
+    if not last_at:
+        return False
+    try:
+        last = datetime.fromisoformat(last_at)
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        return (now - last) > timedelta(minutes=timeout_minutes)
+    except:
+        return False
+
+
+def close_conversation(conversation_id: str, reason: str = "expired") -> None:
+    supabase = get_supabase_client()
+    supabase.table("conversations").update({
+        "status": "closed",
+        "closed_at": datetime.now(timezone.utc).isoformat(),
+        "close_reason": reason,
+    }).eq("id", conversation_id).execute()
+
+
+def update_conversation(conversation_id: str, **kwargs) -> None:
+    supabase = get_supabase_client()
+    kwargs["updated_at"] = datetime.now(timezone.utc).isoformat()
+    if "last_message_at" not in kwargs:
+        kwargs["last_message_at"] = datetime.now(timezone.utc).isoformat()
+    supabase.table("conversations").update(kwargs).eq("id", conversation_id).execute()
+
+
+def append_message(conversation_id: str, role: str, content: str, current_messages: list = None) -> list:
+    supabase = get_supabase_client()
+    from app.config import Config
+    max_messages = Config.MAX_RECENT_MESSAGES
+
+    messages = current_messages or []
+    messages.append({
+        "role": role,
+        "content": content,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    })
+    if len(messages) > max_messages:
+        messages = messages[-max_messages:]
+
+    supabase.table("conversations").update({
+        "recent_messages": messages,
+        "last_message_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", conversation_id).execute()
+
+    return messages
