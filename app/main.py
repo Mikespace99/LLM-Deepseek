@@ -14,6 +14,7 @@ from app.ai.intent_parser import (
 )
 from app.booking.engine import (
     create_booking,
+    revalidate_slots,
     search_availability,
 )
 from app.config import Config
@@ -336,12 +337,16 @@ async def process_messages(messages: list[dict]):
 
     collected = conversation.get("collected_data") or {}
     new_collected = dict(collected)
-    
+
+    # Catturato SUBITO, prima che qualunque ramo sotto resetti "collected_data":
+    # sono gli slot mostrati realmente al cliente nel turno precedente.
+    previous_last_slots = collected.get("last_slots") or []
+
     backend_results = {
         "action_executed": action_requested,
         "slot_found": False,
         "slots_list": [],
-        "historical_slots_proposti_prima": new_collected.get("historical_slots") or [],
+        "repeated_previous_slots": False,
         "booking_success": False,
         "is_studio_closed": False,
         "is_studio_full": False,
@@ -372,7 +377,6 @@ async def process_messages(messages: list[dict]):
                 "date": None, "period": None, "weekday": None, "ignore_preferences": None
             }
         }
-        collected = new_collected.copy()
 
         try:
             booking_res = search_availability(tenant=tenant, knowledge=knowledge, collected_data=new_collected)
@@ -390,9 +394,30 @@ async def process_messages(messages: list[dict]):
                 labels = _slot_labels(slots)
                 slots_text_to_append = "\n" + "\n".join(f"{i+1}. {label}" for i, label in enumerate(labels)) + "\n\nQuale preferisci? (puoi rispondere con il numero o con l'orario)"
             else:
-                backend_results["error_type"] = "no_slots_found"
-                if result.get("search_was_narrow"):
-                    backend_results["error_type"] = "no_slots_narrow"
+                # Nessuno slot nuovo: prima di arrenderci, riverifichiamo
+                # (lato backend, MAI lato AI) se le opzioni mostrate nel
+                # turno precedente sono ancora libere e le riproponiamo
+                # in modo deterministico, come nel percorso di successo.
+                fallback_candidates = previous_last_slots or (new_collected.get("historical_slots") or [])
+                still_valid = revalidate_slots(
+                    tenant=tenant,
+                    knowledge=knowledge,
+                    collected_data=new_collected,
+                    slots=fallback_candidates,
+                )
+
+                if still_valid:
+                    backend_results["slot_found"] = True
+                    backend_results["slots_list"] = still_valid
+                    backend_results["repeated_previous_slots"] = True
+                    new_collected["last_slots"] = still_valid
+
+                    labels = _slot_labels(still_valid)
+                    slots_text_to_append = "\n" + "\n".join(f"{i+1}. {label}" for i, label in enumerate(labels)) + "\n\nQuale preferisci? (puoi rispondere con il numero o con l'orario)"
+                else:
+                    backend_results["error_type"] = "no_slots_found"
+                    if result.get("search_was_narrow"):
+                        backend_results["error_type"] = "no_slots_narrow"
         except Exception as e:
             print(f"[BACKEND ERROR] Errore in search_availability: {e}")
             backend_results["error_type"] = "technical_error"
@@ -455,10 +480,12 @@ async def process_messages(messages: list[dict]):
             new_collected = {}
             backend_results["action_executed"] = "RESET_COMPLETED"
 
-    # Memorizzazione degli slot storici se la conversazione è ancora attiva
-    if new_collected and collected.get("last_slots"):
+    # Memorizzazione degli slot storici se la conversazione è ancora attiva.
+    # Usa previous_last_slots, catturato a inizio funzione PRIMA che i rami
+    # sopra potessero resettare o sovrascrivere "collected"/"new_collected".
+    if new_collected and previous_last_slots:
         historical = new_collected.get("historical_slots") or []
-        for old_slot in collected["last_slots"]:
+        for old_slot in previous_last_slots:
             if old_slot not in historical:
                 historical.append(old_slot)
         new_collected["historical_slots"] = historical[-15:]
