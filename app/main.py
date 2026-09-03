@@ -761,18 +761,22 @@ async def process_messages(
 
     history_str = ""
 
-    for message in recent[-5:]:
-        role_label = (
-            "Cliente"
-            if message.get("role") == "user"
-            else "Assistente"
-        )
+for message in recent[-5:]:
+    role_label = (
+        "Cliente"
+        if message.get("role") == "user"
+        else "Assistente"
+    )
 
-        history_str += (
-            f"- {role_label}: "
-            f"{message.get('content') "
-            f"or message.get('text', '')}\n"
-        )
+    content = (
+        message.get("content")
+        or message.get("text", "")
+    )
+
+    history_str += (
+        f"- {role_label}: {content}\n"
+    )
+
 
     reply_text = run_step3_response(
         message_text=combined_text,
