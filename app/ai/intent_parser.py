@@ -54,7 +54,7 @@ Rispondi escludendo qualsiasi testo di contorno, restituisci solo il JSON pulito
             temperature=0.0,
             response_format={"type": "json_object"},
         )
-        return json.loads(response.choices.message.content)
+        return json.loads(response.choices[0].message.content)
     except Exception as e:
         print(f"[AI STEP 1 ERROR] {e}")
         return {"action_requested": "JUST_TALK", "parameters": {}}
@@ -79,15 +79,17 @@ LE TUE LINEE GUIDA DI STILE:
 - **Nessun Elenco**: Tu NON devi MAI scrivere elenchi di slot o orari disponibili nel tuo testo. Ci penserà il sistema ad appenderli in automatico sotto il tuo messaggio. Limitati a fare l'introduzione cortese.
 
 GESTIONE DEI RISULTATI DEL CALENDARIO:
-1. SE IL BACKEND HA TROVATO APPUNTAMENTI (slot_found = True):
+1. SE IL BACKEND HA TROVATO APPUNTAMENTI (slot_found = True) E 'repeated_previous_slots' NON è True:
    Scrivi un'introduzione cortese ed empatica riferita al periodo richiesto (es. 'Certamente, ecco le disponibilità per mercoledì prossimo di pomeriggio:').
-2. SE IL BACKEND NON HA TROVATO APPUNTAMENTI (slot_found = False):
+2. SE IL BACKEND HA TROVATO APPUNTAMENTI (slot_found = True) E 'repeated_previous_slots' È True:
+   Il backend ha già riverificato che le opzioni proposte in precedenza sono ancora libere. Scrivi solo una breve introduzione che lo comunichi (es. 'Per quel giorno purtroppo non ho disponibilità, ma le opzioni che avevamo valutato prima sono ancora libere:'). NON elencare tu orari o date: ci pensa il sistema subito sotto.
+3. SE IL BACKEND NON HA TROVATO APPUNTAMENTI (slot_found = False):
    - Se 'is_studio_closed' è True, spiega in modo estremamente professionale che in quel giorno specifico lo studio è chiuso o è festivo, e proponi di valutare un altro giorno.
-   - Se 'is_studio_full' è True, spiega che per quel giorno/fascia siamo al completo. 
-   - In ogni caso di fallimento, controlla se sono presenti degli 'historical_slots_proposti_prima'. Se ci sono, sii proattiva e riproponi esplicitamente le opzioni del messaggio precedente (es. 'Purtroppo per quel giorno siamo al completo. Ti ripropongo le opzioni che avevamo valutato prima:').
-3. SE IL BACKEND CONFERMA IL SUCCESSO DI UN APPUNTAMENTO (booking_success = True):
+   - Se 'is_studio_full' è True, spiega che per quel giorno/fascia siamo al completo.
+   - In questo caso (slot_found = False) NON esistono più opzioni valide da riproporre (il backend le ha già cercate e riverificate senza successo): non menzionare mai orari, date o "opzioni di prima" scritti a mano, anche se li vedi nella cronologia della chat.
+4. SE IL BACKEND CONFERMA IL SUCCESSO DI UN APPUNTAMENTO (booking_success = True):
    Genera un messaggio di successo caloroso e professionale, che contenga il riepilogo testuale esplicito per il cliente (Servizio, Giorno, Ora e Nome dell'intestatario).
-4. SE L'UTENTE HA ANNULLATO O SALUTATO (action = JUST_TALK o RESET_COMPLETED):
+5. SE L'UTENTE HA ANNULLATO O SALUTATO (action = JUST_TALK o RESET_COMPLETED):
    Rispondi salutando cordialmente e confermando che rimani a disposizione.
 
 Restituisci solo il testo fluido della risposta da inviare, senza codice JSON e senza blocchi markdown.
@@ -108,7 +110,7 @@ Restituisci solo il testo fluido della risposta da inviare, senza codice JSON e 
             ],
             temperature=0.2,
         )
-        return response.choices.message.content.strip()
+        return response.choices[0].message.content.strip()
     except Exception as e:
         print(f"[AI STEP 3 ERROR] {e}")
         return "Certamente, ecco le disponibilità trovate:"
