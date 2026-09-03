@@ -370,11 +370,14 @@ async def process_messages(messages: list[dict]):
             "historical_slots": historical_backup,
             "last_slots": [],
             "preferences": {
+                "period": parameters.get("period"),
+                "weekday": parameters.get("weekday"),
+                "week_part": parameters.get("week_part"),
                 "date_from": parameters.get("date_from"),
                 "date_to": parameters.get("date_to"),
                 "time_preference": parameters.get("time_preference"),
                 "exact_time": parameters.get("exact_time"),
-                "date": None, "period": None, "weekday": None, "ignore_preferences": None
+                "date": None, "ignore_preferences": None
             }
         }
 
