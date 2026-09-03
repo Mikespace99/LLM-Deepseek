@@ -42,6 +42,16 @@ ITALIAN_MONTHS = [
 
 MAX_CANDIDATE_SLOTS = 5
 
+_WEEKDAY_NAME_TO_ISO = {
+    "lunedì": 1,
+    "martedì": 2,
+    "mercoledì": 3,
+    "giovedì": 4,
+    "venerdì": 5,
+    "sabato": 6,
+    "domenica": 7,
+}
+
 
 def _match_service(
     services: list[dict],
@@ -132,6 +142,51 @@ def _build_context(
     }
 
 
+def _resolve_weekday_date(
+    weekday_name: str,
+    from_date: date,
+    to_date: date,
+    today: date,
+    slot_search_days: int,
+) -> date | None:
+    """
+    Trova la data esatta corrispondente al giorno della settimana
+    richiesto (es. "mercoledì"), in modo puramente deterministico:
+    l'AI classifica solo "quale giorno" è stato nominato, questa
+    funzione è l'UNICA responsabile del calcolo effettivo della data.
+
+    1) Cerca prima dentro il periodo già stabilito nella conversazione
+       (es. "prossima settimana"): è il caso normale di un follow-up
+       tipo "mercoledì" dopo "prossima settimana".
+    2) Se non trova nulla lì (periodo troppo stretto o già passato),
+       cerca la prossima occorrenza futura di quel giorno entro
+       l'orizzonte di ricerca del tenant.
+    """
+    target_iso = _WEEKDAY_NAME_TO_ISO.get(
+        (weekday_name or "").strip().lower()
+    )
+
+    if not target_iso:
+        return None
+
+    cursor = max(from_date, today)
+
+    while cursor <= to_date:
+        if cursor.isoweekday() == target_iso:
+            return cursor
+        cursor += timedelta(days=1)
+
+    cursor = today
+    horizon = today + timedelta(days=slot_search_days)
+
+    while cursor <= horizon:
+        if cursor.isoweekday() == target_iso:
+            return cursor
+        cursor += timedelta(days=1)
+
+    return None
+
+
 def _compute_search_window(ctx: dict) -> dict:
     prefs = ctx["preferences"] or {}
 
@@ -170,20 +225,59 @@ def _compute_search_window(ctx: dict) -> dict:
         "this_week",
         "next_week",
     ):
-        base = (
-            today + timedelta(days=7)
-            if prefs.get("period") == "next_week"
-            else today
+        # Lunedì della settimana CORRENTE, calcolato dal calendario reale
+        # (non da un'AI): isoweekday() 1=lunedì ... 7=domenica.
+        this_monday = today - timedelta(
+            days=today.weekday()
         )
 
-        from_date = base
-        to_date = base + timedelta(days=6)
+        monday = (
+            this_monday + timedelta(days=7)
+            if prefs.get("period") == "next_week"
+            else this_monday
+        )
+
+        from_date = monday
+        to_date = monday + timedelta(days=6)
+
+        # Sotto-porzione della settimana (es. "inizio settimana"),
+        # anch'essa calcolata qui e mai dall'AI.
+        week_part = prefs.get("week_part")
+
+        if week_part == "start":
+            to_date = from_date + timedelta(days=2)
+        elif week_part == "mid":
+            from_date = from_date + timedelta(days=1)
+            to_date = from_date + timedelta(days=2)
+        elif week_part == "weekend":
+            from_date = from_date + timedelta(days=3)
+            to_date = from_date + timedelta(days=2)
 
     else:
         from_date = today
         to_date = today + timedelta(
             days=ctx["slot_search_days"]
         )
+
+    # Giorno della settimana esplicito (es. "mercoledì"): risolto qui,
+    # con codice deterministico, mai dall'AI.
+    weekday_name = prefs.get("weekday")
+
+    if (
+        weekday_name
+        and not prefs.get("date")
+        and not ignore_prefs
+    ):
+        resolved = _resolve_weekday_date(
+            weekday_name,
+            from_date,
+            to_date,
+            today,
+            ctx["slot_search_days"],
+        )
+
+        if resolved:
+            from_date = to_date = resolved
 
     preferred_window = None
 
@@ -220,6 +314,8 @@ def _compute_search_window(ctx: dict) -> dict:
         prefs.get("date")
         or prefs.get("date_from")
         or prefs.get("period")
+        or prefs.get("weekday")
+        or prefs.get("week_part")
     )
 
     has_time_constraint = preferred_window is not None
