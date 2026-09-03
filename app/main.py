@@ -164,26 +164,38 @@ async def process_messages(messages: list[dict]):
     # Gestione sessione scaduta
     if expired:
         wa_info = tenant.get("info") or {}
-        await send_whatsapp_message(phone, tpl.CONVERSATION_EXPIRED, wa_info.get("access_token") or Config.WHATSAPP_TOKEN, wa_info.get("phone_number_id") or Config.WHATSAPP_PHONE_NUMBER_ID)
-        append_message(conversation["id"], role="assistant", content=tpl.CONVERSATION_EXPIRED, current_messages=conversation.get("recent_messages"))
+        await send_whatsapp_message(
+            phone, 
+            tpl.CONVERSATION_EXPIRED, 
+            wa_info.get("access_token") or Config.WHATSAPP_TOKEN, 
+            wa_info.get("phone_number_id") or Config.WHATSAPP_PHONE_NUMBER_ID
+        )
+        append_message(
+            conversation["id"], 
+            role="assistant", 
+            content=tpl.CONVERSATION_EXPIRED, 
+            current_messages=conversation.get("recent_messages")
+        )
         return
 
     knowledge = get_tenant_knowledge(tenant_id)
-    context = build_context(tenant=tenant, customer=customer, conversation=conversation, message={"message": combined_text, "message_id": last.get("message_id"), "received_at": last.get("received_at")}, knowledge=knowledge)
+    context = build_context(
+        tenant=tenant, 
+        customer=customer, 
+        conversation=conversation, 
+        message={"message": combined_text, "message_id": last.get("message_id"), "received_at": last.get("received_at")}, 
+        knowledge=knowledge
+    )
 
-    # ------------------------------------------------------------
-    # STEP 1: AI ANALISTA (Comprensione dell'intenzione pura)
-    # ------------------------------------------------------------
+    # 1. AI ANALISTA
     print("[STEP 1] Esecuzione AI Analista...")
     step1_result = run_step1_analysis(message_text=combined_text, full_context_dict=context)
     action_requested = step1_result.get("action_requested", "JUST_TALK")
     parameters = step1_result.get("parameters") or {}
 
-    # Dati pronti per essere manipolati matematicamente dal backend
     collected = conversation.get("collected_data") or {}
     new_collected = dict(collected)
     
-    # Inizializziamo l'oggetto dei risultati reali da passare allo Step 3
     backend_results = {
         "action_executed": action_requested,
         "slot_found": False,
@@ -194,12 +206,9 @@ async def process_messages(messages: list[dict]):
     }
     slots_text_to_append = ""
 
-    # ------------------------------------------------------------
-    # STEP 2 & STEP 4: IL BACKEND ESEGUE LE VERIFICHE E LE TRANSAZIONI
-    # ------------------------------------------------------------
-    print(f"[STEP 2/4] Elaborazione deterministica backend per azione: {action_requested}")
+    # 2. & 4. MOTORE BACKEND DETERMINISTICO
+    print(f"[STEP 2/4] Elaborazione backend per: {action_requested}")
 
-    # Sotto-flusso A: Ricerca Disponibilità
     if action_requested == "SEARCH_SLOTS":
         new_collected["last_slots"] = []
         new_collected["preferences"] = {
@@ -222,20 +231,18 @@ async def process_messages(messages: list[dict]):
                 backend_results["slots_list"] = slots
                 new_collected["last_slots"] = slots
                 
-                # Prepariamo la lista numerata rigida da appendere sotto il testo dell'IA
                 labels = _slot_labels(slots)
                 slots_text_to_append = "\n" + "\n".join(f"{i+1}. {label}" for i, label in enumerate(labels)) + "\n\nQuale preferisci? (puoi rispondere con il numero o con l'orario)"
             else:
                 backend_results["error_type"] = "no_slots_found"
-            if result.get("search_was_narrow"):
+                if result.get("search_was_narrow"):
                     backend_results["error_type"] = "no_slots_narrow"
-            except Exception as e:
-                print(f"[BACKEND ERROR] Errore in search_availability: {e}")
-                backend_results["error_type"] = "technical_error"
+        except Exception as e:
+            print(f"[BACKEND ERROR] Errore in search_availability: {e}")
+            backend_results["error_type"] = "technical_error"
 
-    # Sotto-flusso B: Prenotazione Deterministica e Transazione (Step 4 Consolidamento)
     elif action_requested == "CONFIRM_BOOKING":
-                slot_number = parameters.get("slot_number")
+        slot_number = parameters.get("slot_number")
         exact_time = parameters.get("exact_time")
         
         resolved_slot = None
@@ -248,7 +255,6 @@ async def process_messages(messages: list[dict]):
                     resolved_slot = new_collected["last_slots"][idx]
             except (TypeError, ValueError):
                 pass
-                
         elif exact_time:
             wanted = str(exact_time).strip()
             for slot in all_slots_in_memory:
@@ -261,7 +267,6 @@ async def process_messages(messages: list[dict]):
             if parameters.get("person_name"):
                 new_collected["person_name"] = parameters.get("person_name")
             
-            # [STEP 4]: Inserimento fisico e blindato su Supabase
             try:
                 booking_res = create_booking(
                     tenant=tenant, 
@@ -272,7 +277,6 @@ async def process_messages(messages: list[dict]):
                 )
                 if booking_res.get("result", {}).get("success"):
                     backend_results["booking_success"] = True
-                    # Svuotiamo i filtri: la transazione è conclusa con successo!
                     new_collected = {}
                 else:
                     backend_results["error_type"] = "slot_occupied"
@@ -282,20 +286,17 @@ async def process_messages(messages: list[dict]):
         else:
             backend_results["error_type"] = "slot_not_found_in_memory"
 
-    # Sotto-flusso C: Chiacchiere, Saluti o Annullamento ("Lascia stare")
     else:
         if parameters.get("service"):
             new_collected["service"] = parameters.get("service")
         if parameters.get("person_name"):
             new_collected["person_name"] = parameters.get("person_name")
             
-        # [STEP 5]: Se l'utente esprime esplicitamente un congedo o un annullamento, pialliamo il DB
         lowered_text = combined_text.lower()
         if "lascia stare" in lowered_text or "annull" in lowered_text or "basta" in lowered_text or "grazie" in lowered_text:
             new_collected = {}
             backend_results["action_executed"] = "RESET_COMPLETED"
 
-    # Memorizzazione degli slot storici se la conversazione è ancora attiva
     if new_collected and collected.get("last_slots"):
         historical = new_collected.get("historical_slots") or []
         for old_slot in collected["last_slots"]:
@@ -303,12 +304,8 @@ async def process_messages(messages: list[dict]):
                 historical.append(old_slot)
         new_collected["historical_slots"] = historical[-15:]
 
-    # ------------------------------------------------------------
-    # STEP 3: AI REDATTRICE (Generazione della risposta WhatsApp reale)
-    # ------------------------------------------------------------
+    # 3. AI REDATTRICE
     print("[STEP 3] Invocazione AI Redattrice con i dati reali del backend...")
-    
-    # Costruiamo la stringa della cronologia per nutrire lo Step 3
     history_str = ""
     for m in recent[-5:]:
         role_label = "Cliente" if m.get("role") == "user" else "Assistente"
@@ -320,15 +317,12 @@ async def process_messages(messages: list[dict]):
         history_text=history_str
     )
 
-    # Se il backend ha trovato degli slot feriali reali, li appende rigidamente sotto il testo dell'IA
     if action_requested == "SEARCH_SLOTS" and backend_results["slot_found"]:
         reply_text = f"{reply_text}\n{slots_text_to_append}"
     elif action_requested == "CONFIRM_BOOKING" and backend_results["error_type"] == "slot_not_found_in_memory":
         reply_text = "Scusami, non sono riuscito a trovare lo slot richiesto. Potresti indicarmi il numero esatto tra quelli proposti sopra?"
 
-    # ------------------------------------------------------------
-    # STEP 5: CONSOLIDAMENTO E STRUTTURAZIONE INVIO FINALE
-    # ------------------------------------------------------------
+    # 5. SALUTO FINALE / CONSOLIDAMENTO
     print("[STEP 5] Salvataggio finale del DB e invio su WhatsApp Cloud API...")
     update_conversation(conversation["id"], collected_data=new_collected, workflow="idle", step="none")
 
