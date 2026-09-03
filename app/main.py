@@ -8,7 +8,6 @@ from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import Config
-from app.constants import WORKFLOW_IDLE, STEP_NONE
 from app.repositories.tenant import (
     get_tenant_by_whatsapp_number,
     get_tenant_knowledge,
@@ -20,30 +19,26 @@ from app.repositories.conversation import (
     append_message,
 )
 from app.context.builder import build_context
-# Invochiamo la nuova pipeline agentica centralizzata
 from app.ai.intent_parser import run_agent_pipeline
-from app.decision import decide
 from app.templates import messages as tpl
 from app.integrations.whatsapp import send_whatsapp_message
 from app.booking.engine import search_availability, create_booking
 from app.message_buffer import message_buffer
 from app.web.routes import router as web_router
 
-app = FastAPI(title="AI Booking Simple", version="0.2.0")
+app = FastAPI(title="AI Booking Agentic", version="1.0.0")
 
-# Web UI (login, register, onboarding)
 app.include_router(web_router)
 
 
 # ============================================================
-# UTILITIES E HELPER DI FORMATTAZIONE
+# HELPER MATEMATICI DI FORMATTAZIONE ETICHETTE SLOT
 # ============================================================
 
 def _slot_labels(slots: list) -> list[str]:
-    """Prende una lista di slot e restituisce una lista di stringhe formattate in modo corretto."""
+    """Prende una lista di slot e restituisce una lista di stringhe formattate matematicamente."""
     labels = []
     
-    # Mappatura standard ISO (Python: Monday=0, Sunday=6)
     iso_weekdays = {
         0: "Lunedì", 1: "Martedì", 2: "Mercoledì", 3: "Giovedì",
         4: "Venerdì", 5: "Sabato", 6: "Domenica"
@@ -57,13 +52,10 @@ def _slot_labels(slots: list) -> list[str]:
     for s in slots:
         if isinstance(s, dict) and s.get("date") and s.get("time"):
             try:
-                # Leggiamo la data reale estratta (es. "2026-09-11")
                 dt = datetime.strptime(s["date"][:10], "%Y-%m-%d")
                 giorno_settimana = iso_weekdays[dt.weekday()]
                 mese_str = iso_months[dt.month]
-                time_str = s["time"][:5] # Prende HH:MM
-                
-                # Generiamo la label perfetta senza sfasamenti di array esterni
+                time_str = s["time"][:5]
                 labels.append(f"{giorno_settimana} {dt.day} {mese_str} alle {time_str}")
             except Exception:
                 labels.append(s.get("label") or s.get("datetime") or str(s))
@@ -72,145 +64,13 @@ def _slot_labels(slots: list) -> list[str]:
     return labels
 
 
-
-def _build_reply_after_n8n(context: dict, decision: dict) -> str:
-    """Costruisce la risposta testuale unendo l'intelligenza dell'IA con gli slot reali del DB."""
-    booking = context.get("booking") or {}
-    slots = booking.get("candidate_slots") or []
-    result = booking.get("result") or {}
-    n8n_action = decision.get("n8n_action")
-    ai_reply = decision.get("whatsapp_reply_override")
-
-    # Caso Creazione Prenotazione
-    if n8n_action == "create_booking":
-        if ai_reply:
-            return ai_reply
-        return tpl.BOOKING_CONFIRMED if result.get("success") else tpl.BOOKING_FAILED
-
-    # Caso Ricerca Slot (search_availability)
-    if slots:
-        labels = _slot_labels(slots)
-        # Costruiamo la lista numerata in modo pulito
-        slots_text = "\n".join(f"{i+1}. {label}" for i, label in enumerate(labels))
-        
-        # Se l'IA ha generato un testo empatico (es. "Ecco i posti per la settimana prossima:"), usiamo quello come intro!
-        if ai_reply and "Non ho trovato" not in ai_reply:
-            return f"{ai_reply}\n\n{slots_text}\n\nQuale preferisci? (puoi rispondere con il numero o con l'orario)"
-        
-        # Altrimenti testo standard lineare senza dire "Non ho trovato come richiesto"
-        return f"Ecco le disponibilità trovate:\n\n{slots_text}\n\nQuale preferisci? (puoi rispondere con il numero o con l'orario)"
-
-    # Caso in cui NON ci sono slot
-    if ai_reply: 
-        return ai_reply  # Lasciamo che l'IA spieghi in modo umano perché non c'è posto e cosa fare
-        
-    if result.get("no_slots") and result.get("search_was_narrow"):
-        days = (context.get("tenant") or {}).get("slot_search_days") or 30
-        return tpl.no_slots_narrow(days)
-        
-    return tpl.NO_SLOTS_FOUND
-
-
-def _resolve_template(decision: dict, context: dict) -> str:
-    """Associa la chiave del template decisa dal motore al testo finale."""
-    # RETE DI SICUREZZA AGENTICA: Se l'IA ha generato la risposta fluida personalizzata,
-    # la usiamo direttamente scavalcando tutti i vecchi template rigidi del backend.
-    if decision.get("whatsapp_reply_override"):
-        return decision["whatsapp_reply_override"]
-
-    key = decision.get("template_key")
-    collected = context.get("collected_data") or {}
-    booking = context.get("booking") or {}
-    tenant_info = (context.get("tenant") or {}).get("info") or {}
-    ai = context.get("ai") or {}
-    entities = ai.get("entities") or {}
-
-    static = tpl.get_template(key) if key else None
-    knowledge = context.get("knowledge") or {}
-
-    if key == "ask_service":
-        return tpl.ask_service_with_list(knowledge.get("services"))
-
-    if key == "confirmation_summary":
-        slot = collected.get("selected_slot") or {}
-        slot_date = slot.get("date") if isinstance(slot, dict) else None
-        slot_time = slot.get("time") if isinstance(slot, dict) else None
-        slot_label = slot.get("label") if isinstance(slot, dict) else None
-        return tpl.confirmation_summary(
-            service=collected.get("service") or "—",
-            date=slot_date or slot_label or "—",
-            time=slot_time or "—",
-            person_name=collected.get("person_name") or "—",
-        )
-
-    if key == "confirm_slot":
-        slot = collected.get("selected_slot") or {}
-        label = slot.get("label") if isinstance(slot, dict) else None
-        return tpl.confirm_slot(label or "questo slot")
-
-    if key == "no_slots_narrow":
-        days = (context.get("tenant") or {}).get("slot_search_days") or 30
-        return tpl.no_slots_narrow(days)
-
-    if key == "showing_slots":
-        slots = booking.get("candidate_slots") or collected.get("last_slots") or []
-        labels = _slot_labels(slots)
-        if labels:
-            return tpl.showing_slots(labels)
-        return tpl.NO_SLOTS_FOUND
-
-    if key == "lateral_info":
-        info_type = entities.get("info_type")
-        msg = ((context.get("request") or {}).get("message") or "").lower()
-        knowledge = context.get("knowledge") or {}
-        tenant_ctx = context.get("tenant") or {}
-
-        if info_type == "parking" or "parcheggio" in msg:
-            parking = tenant_info.get("parking") or "Per il parcheggio ti consiglio di chiedere in studio."
-            return f"{parking}\n\n{tpl.LATERAL_CONTINUE}"
-        if info_type == "price" or "prezzo" in msg or "costa" in msg:
-            services_text = knowledge.get("services_text") or ""
-            if services_text:
-                return f"Ecco i servizi e i prezzi:\n\n{services_text}\n\n{tpl.LATERAL_CONTINUE}"
-            return f"I prezzi dipendono dal servizio. Dimmi pure quale ti interessa.\n\n{tpl.LATERAL_CONTINUE}"
-        if info_type == "address" or "indirizzo" in msg or "dove siete" in msg or "sede" in msg:
-            locations_text = knowledge.get("locations_text") or ""
-            if locations_text:
-                return f"Le nostre sedi:\n\n{locations_text}\n\n{tpl.LATERAL_CONTINUE}"
-            address = tenant_info.get("address") or "L'indirizzo è disponibile su richiesta."
-            return f"{address}\n\n{tpl.LATERAL_CONTINUE}"
-        if info_type == "hours" or "orari" in msg:
-            hours_text = knowledge.get("working_hours_text") or ""
-            if hours_text:
-                return f"Orari di apertura:\n\n{hours_text}\n\n{tpl.LATERAL_CONTINUE}"
-            return f"Gli orari dipendono dal giorno. Scrivimi pure per quale giorno ti serve sapere.\n\n{tpl.LATERAL_CONTINUE}"
-        if "serviz" in msg:
-            services_text = knowledge.get("services_text") or ""
-            if services_text:
-                return f"I nostri servizi:\n\n{services_text}\n\n{tpl.LATERAL_CONTINUE}"
-        specialty = tenant_ctx.get("specialty")
-        if specialty and ("specializz" in msg or "cosa fate" in msg or "chi siete" in msg):
-            name = tenant_ctx.get("business_name") or "Lo studio"
-            return f"{name} – {specialty}.\n\n{tpl.LATERAL_CONTINUE}"
-        return f"Certo, dimmi pure cosa ti serve sapere (orari, sedi, servizi, prezzi…).\n\n{tpl.LATERAL_CONTINUE}"
-
-    if static:
-        return static
-    return tpl.UNCLEAR
-
-
 # ============================================================
-# ROTTE API E WEBHOOK VERIFICATION
+# ROTTE DI VERIFICA E WEBHOOK
 # ============================================================
 
 @app.get("/api/status")
 def api_status():
-    return {"status": "running", "message": "Backend WhatsApp AI attivo e funzionante!"}
-
-
-@app.get("/health")
-def health():
-    return {"status": "ok", "version": "0.2.0"}
+    return {"status": "running", "message": "Backend WhatsApp AI Agentic attivo!"}
 
 
 @app.get("/webhook/whatsapp")
@@ -244,8 +104,6 @@ async def whatsapp_webhook(request: Request):
             return PlainTextResponse("Forbidden", status_code=403)
 
     payload = json.loads(raw_body)
-    print("--- WEBHOOK RICEVUTO DA META ---", payload)
-
     message = _extract_message(payload)
     if not message:
         return {"status": "ignored"}
@@ -255,7 +113,6 @@ async def whatsapp_webhook(request: Request):
 
 
 def _extract_message(payload: dict) -> dict | None:
-    """Estrae in modo sicuro i metadati del messaggio WhatsApp dal payload Meta."""
     try:
         entry = payload["entry"][0]
         change = entry["changes"][0]
@@ -287,7 +144,7 @@ def _extract_message(payload: dict) -> dict | None:
 
 
 # ============================================================
-# PIPELINE PRINCIPALE (MODALITÀ AGENTICA LOCALE)
+# PIPELINE ESECUTIVA PRINCIPALE (DETERMINISTICA)
 # ============================================================
 
 async def process_messages(messages: list[dict]):
@@ -299,38 +156,36 @@ async def process_messages(messages: list[dict]):
     business_phone = last["to"]
 
     combined_text = "\n".join(m["message"].strip() for m in messages if m.get("message"))
-    print(f"=== PROCESS {len(messages)} MSG da {phone} ===")
-    print(combined_text)
+    print(f"=== ENGINE PROCESS {len(messages)} MSG DA {phone} ===")
 
-    # 1. Caricamento Tenant
+    # 1. Recupero Dati Tenant, Customer e Conversazione
     tenant = get_tenant_by_whatsapp_number(business_phone)
     if not tenant:
         print("Tenant non trovato per numero:", business_phone)
         return
 
     tenant_id = tenant["id"]
-
-    # 2. Caricamento Customer
     customer = get_or_create_customer(tenant_id, phone)
-
-    # 3. Caricamento Conversazione dello stato
     conversation, expired = get_or_create_conversation(tenant["id"], customer["id"], phone)
 
-    # 4. Aggiornamento storico messaggi nel DB
+    # 2. Append e aggiornamento cronologia a DB
     recent = conversation.get("recent_messages") or []
     for m in messages:
-        recent = append_message(
-            conversation["id"],
-            role="user",
-            content=m["message"],
-            current_messages=recent,
-        )
+        recent = append_message(conversation["id"], role="user", content=m["message"], current_messages=recent)
     conversation["recent_messages"] = recent
 
-    # 5. Caricamento Knowledge strutturata
+    # Gestione della sessione scaduta
+    if expired:
+        wa_info = tenant.get("info") or {}
+        token = wa_info.get("access_token") or Config.WHATSAPP_TOKEN
+        phone_id = wa_info.get("phone_number_id") or Config.WHATSAPP_PHONE_NUMBER_ID
+        await send_whatsapp_message(phone, tpl.CONVERSATION_EXPIRED, token, phone_id)
+        append_message(conversation["id"], role="assistant", content=tpl.CONVERSATION_EXPIRED, current_messages=conversation.get("recent_messages"))
+        return
+
     knowledge = get_tenant_knowledge(tenant_id)
 
-    # 6. Costruzione del Context completo da dare all'Agente
+    # 3. Costruzione del Context completo per il Prompt
     fake_message = {
         "message": combined_text,
         "message_id": last.get("message_id"),
@@ -338,81 +193,73 @@ async def process_messages(messages: list[dict]):
         "from": phone,
         "to": business_phone,
     }
-    context = build_context(
-        tenant=tenant,
-        customer=customer,
-        conversation=conversation,
-        message=fake_message,
-        knowledge=knowledge,
-    )
+    context = build_context(tenant=tenant, customer=customer, conversation=conversation, message=fake_message, knowledge=knowledge)
 
-    # Gestione della conversazione scaduta
-    if expired:
-        wa_info = tenant.get("info") or {}
-        token = wa_info.get("access_token") or Config.WHATSAPP_TOKEN
-        phone_id = wa_info.get("phone_number_id") or Config.WHATSAPP_PHONE_NUMBER_ID
-
-        await send_whatsapp_message(phone, tpl.CONVERSATION_EXPIRED, token, phone_id)
-        append_message(
-            conversation["id"],
-            role="assistant",
-            content=tpl.CONVERSATION_EXPIRED,
-            current_messages=conversation.get("recent_messages"),
-        )
-        return
-
-    # 7. ESECUZIONE DEL CERVELLO CENTRALE (Agente AI-Driven)
-    print("[DEBUG 7] Invoco run_agent_pipeline con l'Agente centrale...")
-    agent_result = run_agent_pipeline(
-        message_text=combined_text,
-        full_context_dict=context
-    )
+    # 4. CHIAMATA AL CERVELLO DELL'AGENTE AI (Solo interpretazione e comandi)
+    print("[PIPELINE] Invocazione Agente AI Centralizzato...")
+    agent_output = run_agent_pipeline(message_text=combined_text, full_context_dict=context)
     
-    # Sincronizziamo l'output dell'agente nel dizionario context per retrocompatibilità
-    context["ai"] = {
-        "intent": agent_result.get("new_workflow"),
-        "entities": agent_result.get("backend_action", {}).get("parameters", {})
-    }
+    whatsapp_reply = agent_output.get("whatsapp_reply", "")
+    action = agent_output.get("action", "JUST_TALK")
+    parameters = agent_output.get("parameters") or {}
 
-    # 8. Esecuzione materiale dei comandi e allineamento degli stati
-    print("[DEBUG 8] Eseguo la trasposizione degli stati con il nuovo decide...")
-    decision = decide(agent_result, conversation)
-    
-    collected = decision.get("updated_collected") or conversation.get("collected_data") or {}
+    collected = conversation.get("collected_data") or {}
+    new_collected = dict(collected)
+    reply_text = whatsapp_reply
 
-    update_fields = {
-        "workflow": decision["workflow"],
-        "step": decision["step"],
-        "collected_data": collected,
-    }
-    update_conversation(conversation["id"], **update_fields)
-    conversation.update(update_fields)
+    # ============================================================
+    # SMISTAMENTO COMANDI DELL'IA AL MOTORE DETERMINISTICO
+    # ============================================================
 
-    context["conversation"]["workflow"] = decision["workflow"]
-    context["conversation"]["step"] = decision["step"]
-    context["collected_data"] = collected
+    # COMANDO 1: RICERCA DISPONIBILITÀ (Controllata dal codice)
+    if action == "SEARCH_SLOTS":
+        # Svuotiamo i residui legacy e salviamo i range puliti dell'IA
+        new_collected["last_slots"] = []
+        new_collected["preferences"] = {
+            "date_from": parameters.get("date_from"),
+            "date_to": parameters.get("date_to"),
+            "time_preference": parameters.get("time_preference"),
+            "exact_time": parameters.get("exact_time"),
+            "date": None, "period": None, "weekday": None
+        }
+        if parameters.get("service"):
+            new_collected["service"] = parameters.get("service")
 
-    # 9. Esecuzione Azioni Tecniche sul Calendario/DB locale
-    print("[DEBUG 9] Valutazione esecuzione azioni tecniche locali...")
-    reply_text = None
+        # Invio immediato notifica di cortesia fissa se richiesta
+        if not whatsapp_reply:
+            wa_info = tenant.get("info") or {}
+            await send_whatsapp_message(phone, tpl.VERIFYING_AVAILABILITY, wa_info.get("access_token") or Config.WHATSAPP_TOKEN, wa_info.get("phone_number_id") or Config.WHATSAPP_PHONE_NUMBER_ID)
 
-    if decision["action"] == "request_human":
-        reply_text = "Ti metto in contatto con un operatore. Un attimo di pazienza…"
+        # Chiamata al database calendari locale
+        try:
+            booking_res = search_availability(tenant=tenant, knowledge=knowledge, collected_data=new_collected)
+            slots = booking_res.get("candidate_slots") or []
+            result = booking_res.get("result") or {}
+            
+            if slots:
+                labels = _slot_labels(slots)
+                slots_text = "\n".join(f"{i+1}. {label}" for i, label in enumerate(labels))
+                reply_text = f"{whatsapp_reply}\n\n{slots_text}\n\nQuale preferisci? (puoi rispondere con il numero o l'orario)"
+                new_collected["last_slots"] = slots
+            else:
+                if result.get("search_was_narrow"):
+                    days = tenant.get("slot_search_days") or 30
+                    reply_text = f"{whatsapp_reply}\n\nNon ho trovato disponibilità nel periodo richiesto feriale. Vuoi che allarghi la ricerca ai prossimi {days} giorni?"
+                else:
+                    reply_text = f"{whatsapp_reply}\n\nPurtroppo non ho trovato nessuno slot disponibile nel raggio dei giorni lavorativi dello studio."
+        except Exception as e:
+            print(f"[ENGINE ERROR] Errore durante search_availability: {e}")
+            reply_text = f"{whatsapp_reply}\n\nSi è verificato un problema nel verificare i calendari. Riprova tra un attimo."
 
-    elif decision["action"] == "call_n8n":
-        n8n_action = decision.get("n8n_action")  # "search_availability" | "create_booking"
-        context.setdefault("booking", {})["action"] = n8n_action
-        
-        new_collected = dict(collected)
-        
-        # --- RISOLUZIONE DETERMINISTICA DEGLI SLOT (BACKEND RIGIDO) ---
-        # Il codice Python risolve in modo matematico i numeri degli slot (es. "il 3") o gli orari esatti
-        slot_number = agent_result.get("backend_action", {}).get("parameters", {}).get("slot_number")
-        exact_time = agent_result.get("backend_action", {}).get("parameters", {}).get("exact_time")
+    # COMANDO 2: PRENOTAZIONE DETERMINISTICA (Risoluzione numerica a codice)
+    elif action == "CONFIRM_BOOKING":
+        slot_number = parameters.get("slot_number")
+        exact_time = parameters.get("exact_time")
         
         resolved_slot = None
         all_available_slots = (new_collected.get("last_slots") or []) + (new_collected.get("historical_slots") or [])
         
+        # 1. Verifica matematica dell'indice numerico (es. "Fisso il numero 3")
         if slot_number is not None:
             try:
                 idx = int(slot_number) - 1
@@ -420,7 +267,8 @@ async def process_messages(messages: list[dict]):
                     resolved_slot = new_collected["last_slots"][idx]
             except (TypeError, ValueError):
                 pass
-                
+        
+        # 2. Verifica testuale dell'orario esatto (es. "Fisso alle 16:00")
         elif exact_time:
             wanted = str(exact_time).strip()
             for slot in all_available_slots:
@@ -428,93 +276,54 @@ async def process_messages(messages: list[dict]):
                     resolved_slot = slot
                     break
 
-        # Se il backend trova lo slot cercato dall'utente, forza l'azione a prenotazione diretta
+        # Se il backend trova lo slot cercato dall'utente, esegue l'inserimento protetto su Supabase
         if resolved_slot:
             new_collected["selected_slot"] = resolved_slot
-            collected["selected_slot"] = resolved_slot
-            n8n_action = "create_booking"
-            decision["n8n_action"] = "create_booking"
-
-        # Se dobbiamo cercare disponibilità e l'IA non ha ancora inviato un testo di attesa personalizzato
-        if n8n_action == "search_availability" and decision.get("template_key") == "verifying_availability" and not decision.get("whatsapp_reply_override"):
-            wa_info = tenant.get("info") or {}
-            token = wa_info.get("access_token") or Config.WHATSAPP_TOKEN
-            phone_id = wa_info.get("phone_number_id") or Config.WHATSAPP_PHONE_NUMBER_ID
-            await send_whatsapp_message(phone, tpl.VERIFYING_AVAILABILITY, token, phone_id)
-
-        # --- ESECUZIONE MOTORE LOCALE ---
-        try:
-            if n8n_action == "create_booking":
-                context["booking"] = create_booking(
-                    tenant=tenant,
-                    knowledge=knowledge,
-                    collected_data=collected,
-                    customer=customer,
-                    phone_number=phone,
-                )
-            else:
-                context["booking"] = search_availability(
-                    tenant=tenant,
-                    knowledge=knowledge,
-                    collected_data=collected,
-                )
-        except Exception as e:
-            print(f"[main] Errore critico nel motore di prenotazione locale: {e}")
-            context.setdefault("booking", {})["result"] = {"success": False, "error": str(e)}
-
-        # Genera la risposta post-azione unendo l'intro dell'IA con la lista reale del codice
-        reply_text = _build_reply_after_n8n(context, decision)
-
-        booking = context.get("booking") or {}
-        if booking:
-            # Accumuliamo gli slot storici per gestire i ripensamenti dell'utente
-            if new_collected.get("last_slots"):
-                historical = new_collected.get("historical_slots") or []
-                for old_slot in new_collected["last_slots"]:
-                    if old_slot not in historical:
-                        historical.append(old_slot)
-                new_collected["historical_slots"] = historical[-15:]
-
-            if booking.get("candidate_slots"):
-                new_collected["last_slots"] = booking["candidate_slots"]
-            if booking.get("selected_slot"):
-                new_collected["selected_slot"] = booking["selected_slot"]
-            if booking.get("result"):
-                result = booking["result"]
-                new_collected["last_booking_result"] = result
-                if result.get("no_slots"):
-                    new_collected["no_slots_state"] = "offer_widen" if result.get("search_was_narrow") else "offer_operator"
-                    new_collected.pop("last_slots", None)
+            if parameters.get("person_name"):
+                new_collected["person_name"] = parameters.get("person_name")
+                
+            try:
+                booking_res = create_booking(tenant=tenant, knowledge=knowledge, collected_data=new_collected, customer=customer, phone_number=phone)
+                if booking_res.get("result", {}).get("success"):
+                    reply_text = whatsapp_reply if whatsapp_reply else tpl.BOOKING_CONFIRMED
+                    # Svuotiamo la memoria a transazione felicemente conclusa
+                    new_collected = {}
                 else:
-                    new_collected.pop("no_slots_state", None)
+                    reply_text = "Non è stato possibile confermare lo slot richiesto perché l'orario risulta occupato. Posso cercarne un altro?"
+            except Exception as e:
+                print(f"[ENGINE ERROR] Errore in create_booking: {e}")
+                reply_text = "Si è verificato un errore tecnico durante il salvataggio dell'appuntamento. Riprova."
+        else:
+            # Se l'utente ha provato a selezionare qualcosa che non esiste o che è scaduto, il backend blocca l'allucinazione dell'IA
+            reply_text = "Scusami, non sono riuscito ad agganciare lo slot numerato richiesto. Potresti indicarmi nuovamente il numero o l'orario esatto tra quelli mostrati sopra?"
 
-            update_conversation(
-                conversation["id"],
-                collected_data=new_collected,
-                step=decision["step"],
-            )
-            context["collected_data"] = new_collected
-            conversation["collected_data"] = new_collected
-
+    # COMANDO 3: JUST_TALK (Chiacchiere, Saluti, Chiusure o Annullamenti)
     else:
-        # Se non ci sono azioni tecniche, risolve la risposta di cortesia dell'IA o i vecchi template statici
-        reply_text = _resolve_template(decision, context)
+        if parameters.get("service"):
+            new_collected["service"] = parameters.get("service")
+        if parameters.get("person_name"):
+            new_collected["person_name"] = parameters.get("person_name")
+            
+        # Se l'IA rileva che l'utente ha esplicitamente cancellato o completato la conversazione (es. "Lascia stare")
+        if "annull" in combined_text.lower() or "lascia stare" in combined_text.lower() or "grazie" in combined_text.lower():
+            new_collected = {} # Resetta interamente il database in totale sicurezza
 
-    # 10. Invia risposta finale su WhatsApp
-    print("[DEBUG 10] Invio risposta finale all'utente: ", reply_text)
+    # 5. Memorizzazione dello storico degli slot per i ripensamenti futuri
+    if new_collected and collected.get("last_slots"):
+        historical = new_collected.get("historical_slots") or []
+        for old_slot in collected["last_slots"]:
+            if old_slot not in historical:
+                historical.append(old_slot)
+        new_collected["historical_slots"] = historical[-15:]
+
+    # 6. Salvataggio definitivo dello stato su Supabase
+    update_conversation(conversation["id"], collected_data=new_collected, workflow="idle", step="none")
+
+    # 7. Invio del messaggio su WhatsApp Cloud API
+    print("[DEBUG 10] Invio risposta finale stabilita dal codice feriale: ", reply_text)
     if reply_text:
         wa_info = tenant.get("info") or {}
-        token = wa_info.get("access_token") or Config.WHATSAPP_TOKEN
-        phone_id = wa_info.get("phone_number_id") or Config.WHATSAPP_PHONE_NUMBER_ID
-
-        send_result = await send_whatsapp_message(phone, reply_text, token, phone_id)
-        if send_result is None:
-            print(f"[main] Invio fallito su API Cloud WhatsApp per {phone}.")
-
-        append_message(
-            conversation["id"],
-            role="assistant",
-            content=reply_text,
-            current_messages=conversation.get("recent_messages"),
-        )
-    print("=== DONE ===")
+        await send_whatsapp_message(phone, reply_text, wa_info.get("access_token") or Config.WHATSAPP_TOKEN, wa_info.get("phone_number_id") or Config.WHATSAPP_PHONE_NUMBER_ID)
+        append_message(conversation["id"], role="assistant", content=reply_text, current_messages=conversation.get("recent_messages"))
+        
+    print("=== PIPELINE COMPLETATA E SALVATA ===")
