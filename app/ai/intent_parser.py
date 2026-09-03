@@ -51,10 +51,11 @@ Rispondi escludendo qualsiasi testo di contorno, restituisci solo il JSON pulito
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": json.dumps(full_context_dict, ensure_ascii=False)},
             ],
-            temperature=0.0,  # Zero tolleranza per massima precisione analitica
+            temperature=0.0,
             response_format={"type": "json_object"},
         )
-        return json.loads(response.choices.message.content)
+        # CORREZIONE: Aggiunto l'indice [0] corretto per estrarre la risposta
+        return json.loads(response.choices[0].message.content)
     except Exception as e:
         print(f"[AI STEP 1 ERROR] {e}")
         return {"action_requested": "JUST_TALK", "parameters": {}}
@@ -106,9 +107,10 @@ Restituisci solo il testo fluido della risposta da inviare, senza codice JSON e 
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
             ],
-            temperature=0.2, # Leggera flessibilità per rendere il linguaggio naturale ed empatico
+            temperature=0.2,
         )
-        return response.choices.message.content.strip()
+        # CORREZIONE: Aggiunto l'indice [0] corretto per estrarre la risposta
+        return response.choices[0].message.content.strip()
     except Exception as e:
         print(f"[AI STEP 3 ERROR] {e}")
         return "Certamente, ecco le disponibilità trovate:"
