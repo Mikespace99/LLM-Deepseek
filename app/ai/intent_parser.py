@@ -36,7 +36,7 @@ REGOLE DI SELEZIONE RIGIDE:
 2. MAPPATURA PERIODI VAGHI IN ITALIA:
    - "inizio settimana" -> Da Lunedì a Mercoledì di quella settimana.
    - "metà settimana" -> Da Martedì a Giovedì di quella settimana.
-   - "fine settimana / weekend" -> Da Giovedì a Sabato (Includi giovedì e venerdì feriali).
+   - "fine settimana / weekend" -> Da GIOVEDÌ a SABATO (Includi giovedì e venerdì feriali).
    - "settimana prossima" -> Intera settimana successiva (da Lunedì a Domenica).
 3. FORMULE DI CORTESIA: Parole come "buongiorno", "buon pomeriggio" o "buonasera" all'inizio del testo sono solo saluti. NON usarle come filtro orario (pomeriggio/mattina), lasciali a null a meno che non sia specificato esplicitamente ("vengo di pomeriggio").
 4. ANNULLAMENTI: Se l'utente dice "lascia stare", "annulla tutto" o "non voglio più prenotare", imposta action_requested="JUST_TALK".
@@ -54,8 +54,7 @@ Rispondi escludendo qualsiasi testo di contorno, restituisci solo il JSON pulito
             temperature=0.0,
             response_format={"type": "json_object"},
         )
-        # CORREZIONE: Aggiunto l'indice [0] corretto per estrarre la risposta
-        return json.loads(response.choices[0].message.content)
+        return json.loads(response.choices.message.content)
     except Exception as e:
         print(f"[AI STEP 1 ERROR] {e}")
         return {"action_requested": "JUST_TALK", "parameters": {}}
@@ -81,14 +80,14 @@ LE TUE LINEE GUIDA DI STILE:
 
 GESTIONE DEI RISULTATI DEL CALENDARIO:
 1. SE IL BACKEND HA TROVATO APPUNTAMENTI (slot_found = True):
-   Scrivi un'introduzione cortese ed empatica riferita al periodo richiesto (es. 'Buongiorno! Certamente, ecco le disponibilità per mercoledì prossimo di pomeriggio:').
+   Scrivi un'introduzione cortese ed empatica riferita al periodo richiesto (es. 'Certamente, ecco le disponibilità per mercoledì prossimo di pomeriggio:').
 2. SE IL BACKEND NON HA TROVATO APPUNTAMENTI (slot_found = False):
-   - Controlla se nel dizionario sono presenti degli "slot_storici_proposti_prima". 
-   - Se ci sono, sii proattiva! Spiega in modo cordiale che per il nuovo giorno richiesto non c'è posto, e riproponi esplicitamente le opzioni del messaggio precedente (es. 'Purtroppo per mercoledì non ho disponibilità. Le ripropongo le opzioni che avevamo valutato prima:').
-   - Se non ci sono nemmeno slot storici, proponi gentilmente di valutare un'altra settimana o un altro mese.
+   - Se 'is_studio_closed' è True, spiega in modo estremamente professionale che in quel giorno specifico lo studio è chiuso o è festivo, e proponi di valutare un altro giorno.
+   - Se 'is_studio_full' è True, spiega che per quel giorno/fascia siamo al completo. 
+   - In ogni caso di fallimento, controlla se sono presenti degli 'historical_slots_proposti_prima'. Se ci sono, sii proattiva e riproponi esplicitamente le opzioni del messaggio precedente (es. 'Purtroppo per quel giorno siamo al completo. Ti ripropongo le opzioni che avevamo valutato prima:').
 3. SE IL BACKEND CONFERMA IL SUCCESSO DI UN APPUNTAMENTO (booking_success = True):
    Genera un messaggio di successo caloroso e professionale, che contenga il riepilogo testuale esplicito per il cliente (Servizio, Giorno, Ora e Nome dell'intestatario).
-4. SE L'UTENTE HA ANNULLATO O SALUTATO (action = JUST_TALK):
+4. SE L'UTENTE HA ANNULLATO O SALUTATO (action = JUST_TALK o RESET_COMPLETED):
    Rispondi salutando cordialmente e confermando che rimani a disposizione.
 
 Restituisci solo il testo fluido della risposta da inviare, senza codice JSON e senza blocchi markdown.
@@ -109,8 +108,7 @@ Restituisci solo il testo fluido della risposta da inviare, senza codice JSON e 
             ],
             temperature=0.2,
         )
-        # CORREZIONE: Aggiunto l'indice [0] corretto per estrarre la risposta
-        return response.choices[0].message.content.strip()
+        return response.choices.message.content.strip()
     except Exception as e:
         print(f"[AI STEP 3 ERROR] {e}")
         return "Certamente, ecco le disponibilità trovate:"
