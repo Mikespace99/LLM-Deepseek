@@ -274,572 +274,230 @@ async def whatsapp_webhook(
         }
 
 
-async def process_messages(
-    messages: list[dict],
-):
+async def process_messages(messages: list[dict]):
     if not messages:
         return
 
     last = messages[-1]
-
     phone = last["from"]
     business_phone = last["to"]
 
-    combined_text = "\n".join(
-        message["message"].strip()
-        for message in messages
-        if message.get("message")
-    )
+    combined_text = "\n".join(m["message"].strip() for m in messages if m.get("message"))
+    print(f"=== ENGINE PROCESS {len(messages)} MSG DA {phone} ===")
 
-    print(
-        f"=== ENGINE PROCESS "
-        f"{len(messages)} MSG DA {phone} ==="
-    )
-
-    tenant = get_tenant_by_whatsapp_number(
-        business_phone
-    )
-
+    # 1. Recupero Dati Tenant, Customer e Conversazione
+    tenant = get_tenant_by_whatsapp_number(business_phone)
     if not tenant:
         return
 
     tenant_id = tenant["id"]
+    customer = get_or_create_customer(tenant_id, phone)
+    conversation, expired = get_or_create_conversation(tenant["id"], customer["id"], phone)
 
-    customer = get_or_create_customer(
-        tenant_id,
-        phone,
-    )
-
-    conversation, expired = (
-        get_or_create_conversation(
-            tenant["id"],
-            customer["id"],
-            phone,
-        )
-    )
-
-    recent = (
-        conversation.get("recent_messages")
-        or []
-    )
-
-    for message in messages:
-        recent = append_message(
-            conversation["id"],
-            role="user",
-            content=message["message"],
-            current_messages=recent,
-        )
-
+    # 2. Append e aggiornamento cronologia a DB
+    recent = conversation.get("recent_messages") or []
+    for m in messages:
+        recent = append_message(conversation["id"], role="user", content=m["message"], current_messages=recent)
     conversation["recent_messages"] = recent
 
+    # Gestione della sessione scaduta
     if expired:
         wa_info = tenant.get("info") or {}
-
         await send_whatsapp_message(
-            phone,
-            tpl.CONVERSATION_EXPIRED,
-            wa_info.get("access_token")
-            or Config.WHATSAPP_TOKEN,
-            wa_info.get("phone_number_id")
-            or Config.WHATSAPP_PHONE_NUMBER_ID,
+            phone, 
+            tpl.CONVERSATION_EXPIRED, 
+            wa_info.get("access_token") or Config.WHATSAPP_TOKEN, 
+            wa_info.get("phone_number_id") or Config.WHATSAPP_PHONE_NUMBER_ID
         )
-
         append_message(
-            conversation["id"],
-            role="assistant",
-            content=tpl.CONVERSATION_EXPIRED,
-            current_messages=conversation.get(
-                "recent_messages"
-            ),
+            conversation["id"], 
+            role="assistant", 
+            content=tpl.CONVERSATION_EXPIRED, 
+            current_messages=conversation.get("recent_messages")
         )
-
         return
 
-    knowledge = get_tenant_knowledge(
-        tenant_id
-    )
-
+    knowledge = get_tenant_knowledge(tenant_id)
     context = build_context(
-        tenant=tenant,
-        customer=customer,
-        conversation=conversation,
-        message={
-            "message": combined_text,
-            "message_id": last.get(
-                "message_id"
-            ),
-            "received_at": last.get(
-                "received_at"
-            ),
-        },
-        knowledge=knowledge,
+        tenant=tenant, 
+        customer=customer, 
+        conversation=conversation, 
+        message={"message": combined_text, "message_id": last.get("message_id"), "received_at": last.get("received_at")}, 
+        knowledge=knowledge
     )
 
-    # ========================================================
-    # STEP 1 - AI ANALISTA
-    # ========================================================
+    # ------------------------------------------------------------
+    # STEP 1: AI ANALISTA (Comprensione dell'intenzione pura)
+    # ------------------------------------------------------------
+    print("[STEP 1] Esecuzione AI Analista...")
+    step1_result = run_step1_analysis(message_text=combined_text, full_context_dict=context)
+    action_requested = step1_result.get("action_requested", "JUST_TALK")
+    parameters = step1_result.get("parameters") or {}
 
-    print(
-        "[STEP 1] Esecuzione AI Analista..."
-    )
-
-    step1_result = run_step1_analysis(
-        message_text=combined_text,
-        full_context_dict=context,
-    )
-
-    action_requested = (
-        step1_result.get(
-            "action_requested",
-            "JUST_TALK",
-        )
-    )
-
-    parameters = (
-        step1_result.get("parameters")
-        or {}
-    )
-
-    collected = (
-        conversation.get("collected_data")
-        or {}
-    )
-
+    collected = conversation.get("collected_data") or {}
     new_collected = dict(collected)
-
+    
     backend_results = {
         "action_executed": action_requested,
         "slot_found": False,
         "slots_list": [],
-        "historical_slots_proposti_prima": (
-            new_collected.get(
-                "historical_slots"
-            )
-            or []
-        ),
+        "historical_slots_proposti_prima": new_collected.get("historical_slots") or [],
         "booking_success": False,
         "is_studio_closed": False,
         "is_studio_full": False,
-        "error_type": None,
+        "error_type": None
     }
-
     slots_text_to_append = ""
 
-    # ========================================================
-    # STEP 2 & 4 - BACKEND DETERMINISTICO
-    # ========================================================
+    # ------------------------------------------------------------
+    # STEP 2 & STEP 4: IL BACKEND ESEGUE LE VERIFICHE E LE TRANSAZIONI
+    # ------------------------------------------------------------
+    print(f"[STEP 2/4] Elaborazione backend per: {action_requested}")
 
-    print(
-        f"[STEP 2/4] Elaborazione backend "
-        f"per: {action_requested}"
-    )
-
+    # Sotto-flusso A: Ricerca Disponibilità
     if action_requested == "SEARCH_SLOTS":
-        historical_backup = (
-            new_collected.get(
-                "historical_slots"
-            )
-            or []
-        )
-
-        current_service = (
-            parameters.get("service")
-            or new_collected.get("service")
-        )
-
-        # Pialliamo i residui radice.
+        historical_backup = new_collected.get("historical_slots") or []
+        current_service = parameters.get("service") or new_collected.get("service")
+        
+        # Pialliamo i residui feriali a livello radice
         new_collected = {
             "service": current_service,
             "historical_slots": historical_backup,
             "last_slots": [],
             "preferences": {
-                "date_from": parameters.get(
-                    "date_from"
-                ),
-                "date_to": parameters.get(
-                    "date_to"
-                ),
-                "time_preference": parameters.get(
-                    "time_preference"
-                ),
-                "exact_time": parameters.get(
-                    "exact_time"
-                ),
-                "date": None,
-                "period": None,
-                "weekday": None,
-                "ignore_preferences": None,
-            },
+                "date_from": parameters.get("date_from"),
+                "date_to": parameters.get("date_to"),
+                "time_preference": parameters.get("time_preference"),
+                "exact_time": parameters.get("exact_time"),
+                "date": None, "period": None, "weekday": None, "ignore_preferences": None
+            }
         }
-
         collected = new_collected.copy()
 
         try:
-            booking_res = search_availability(
-                tenant=tenant,
-                knowledge=knowledge,
-                collected_data=new_collected,
-            )
-
-            slots = (
-                booking_res.get(
-                    "candidate_slots"
-                )
-                or []
-            )
-
-            result = (
-                booking_res.get("result")
-                or {}
-            )
-
-            backend_results[
-                "is_studio_closed"
-            ] = result.get(
-                "is_studio_closed",
-                False,
-            )
-
-            backend_results[
-                "is_studio_full"
-            ] = result.get(
-                "is_studio_full",
-                False,
-            )
+            booking_res = search_availability(tenant=tenant, knowledge=knowledge, collected_data=new_collected)
+            slots = booking_res.get("candidate_slots") or []
+            result = booking_res.get("result") or {}
+            
+            backend_results["is_studio_closed"] = result.get("is_studio_closed", False)
+            backend_results["is_studio_full"] = result.get("is_studio_full", False)
 
             if slots:
-                backend_results[
-                    "slot_found"
-                ] = True
-
-                backend_results[
-                    "slots_list"
-                ] = slots
-
-                new_collected[
-                    "last_slots"
-                ] = slots
-
-                labels = _slot_labels(
-                    slots
-                )
-
-                slots_text_to_append = (
-                    "\n"
-                    + "\n".join(
-                        f"{index + 1}. {label}"
-                        for index, label
-                        in enumerate(labels)
-                    )
-                    + "\n\nQuale preferisci? "
-                    "(puoi rispondere con il "
-                    "numero o con l'orario)"
-                )
-
+                backend_results["slot_found"] = True
+                backend_results["slots_list"] = slots
+                new_collected["last_slots"] = slots
+                
+                labels = _slot_labels(slots)
+                slots_text_to_append = "\n" + "\n".join(f"{i+1}. {label}" for i, label in enumerate(labels)) + "\n\nQuale preferisci? (puoi rispondere con il numero o con l'orario)"
             else:
-                backend_results[
-                    "error_type"
-                ] = "no_slots_found"
+                backend_results["error_type"] = "no_slots_found"
+                if result.get("search_was_narrow"):
+                    backend_results["error_type"] = "no_slots_narrow"
+        except Exception as e:
+            print(f"[BACKEND ERROR] Errore in search_availability: {e}")
+            backend_results["error_type"] = "technical_error"
 
-                if result.get(
-                    "search_was_narrow"
-                ):
-                    backend_results[
-                        "error_type"
-                    ] = "no_slots_narrow"
-
-        except Exception as exc:
-            print(
-                "[BACKEND ERROR] "
-                "Errore in search_availability: "
-                f"{exc}"
-            )
-
-            backend_results[
-                "error_type"
-            ] = "technical_error"
-
+    # Sotto-flusso B: Prenotazione Deterministica e Transazione (Step 4)
     elif action_requested == "CONFIRM_BOOKING":
-        slot_number = parameters.get(
-            "slot_number"
-        )
-
-        exact_time = parameters.get(
-            "exact_time"
-        )
-
+        slot_number = parameters.get("slot_number")
+        exact_time = parameters.get("exact_time")
+        
         resolved_slot = None
-
-        all_slots_in_memory = (
-            new_collected.get(
-                "last_slots"
-            )
-            or []
-        ) + (
-            new_collected.get(
-                "historical_slots"
-            )
-            or []
-        )
-
-        # ----------------------------------------------------
-        # Risoluzione tramite numero dello slot.
-        # ----------------------------------------------------
-
+        all_slots_in_memory = (new_collected.get("last_slots") or []) + (new_collected.get("historical_slots") or [])
+        
         if slot_number is not None:
             try:
-                index = int(slot_number) - 1
-
-                last_slots = (
-                    new_collected.get(
-                        "last_slots"
-                    )
-                    or []
-                )
-
-                if (
-                    0 <= index < len(last_slots)
-                ):
-                    resolved_slot = (
-                        last_slots[index]
-                    )
-
-            except (
-                TypeError,
-                ValueError,
-            ):
+                idx = int(slot_number) - 1
+                if 0 <= idx < len(new_collected.get("last_slots", [])):
+                    resolved_slot = new_collected["last_slots"][idx]
+            except (TypeError, ValueError):
                 pass
-
-        # ----------------------------------------------------
-        # Risoluzione tramite orario esatto.
-        # ----------------------------------------------------
-
         elif exact_time:
-            wanted = str(
-                exact_time
-            ).strip()
-
+            wanted = str(exact_time).strip()
             for slot in all_slots_in_memory:
-                if (
-                    slot.get("time")
-                    == wanted
-                    or wanted
-                    in slot.get("label", "")
-                ):
+                if slot.get("time") == wanted or wanted in slot.get("label", ""):
                     resolved_slot = slot
                     break
 
-        # ----------------------------------------------------
-        # Se abbiamo trovato lo slot, lo salviamo.
-        # ----------------------------------------------------
-
         if resolved_slot:
-            new_collected[
-                "selected_slot"
-            ] = resolved_slot
-
-            if parameters.get(
-                "person_name"
-            ):
-                new_collected[
-                    "person_name"
-                ] = parameters.get(
-                    "person_name"
-                )
-
+            new_collected["selected_slot"] = resolved_slot
+            if parameters.get("person_name"):
+                new_collected["person_name"] = parameters.get("person_name")
+            
             try:
                 booking_res = create_booking(
-                    tenant=tenant,
-                    knowledge=knowledge,
-                    collected_data=new_collected,
-                    customer=customer,
-                    phone_number=phone,
+                    tenant=tenant, 
+                    knowledge=knowledge, 
+                    collected_data=new_collected, 
+                    customer=customer, 
+                    phone_number=phone
                 )
-
-                if booking_res.get(
-                    "result",
-                    {},
-                ).get(
-                    "success"
-                ):
-                    backend_results[
-                        "booking_success"
-                    ] = True
-
+                if booking_res.get("result", {}).get("success"):
+                    backend_results["booking_success"] = True
                     new_collected = {}
-
                 else:
-                    backend_results[
-                        "error_type"
-                    ] = "slot_occupied"
-
-            except Exception as exc:
-                print(
-                    "[BACKEND ERROR] "
-                    "Errore in create_booking: "
-                    f"{exc}"
-                )
-
-                backend_results[
-                    "error_type"
-                ] = "technical_error"
-
+                    backend_results["error_type"] = "slot_occupied"
+            except Exception as e:
+                print(f"[BACKEND ERROR] Errore in create_booking: {e}")
+                backend_results["error_type"] = "technical_error"
         else:
-            backend_results[
-                "error_type"
-            ] = "slot_not_found_in_memory"
+            backend_results["error_type"] = "slot_not_found_in_memory"
 
-    # ========================================================
-    # JUST TALK / ALTRI CASI
-    # ========================================================
-
+    # Sotto-flusso C: Chiacchiere, Saluti o Annullamento
     else:
         if parameters.get("service"):
-            new_collected[
-                "service"
-            ] = parameters.get(
-                "service"
-            )
-
+            new_collected["service"] = parameters.get("service")
         if parameters.get("person_name"):
-            new_collected[
-                "person_name"
-            ] = parameters.get(
-                "person_name"
-            )
-
+            new_collected["person_name"] = parameters.get("person_name")
+            
         lowered_text = combined_text.lower()
-
-        if (
-            "lascia stare" in lowered_text
-            or "annull" in lowered_text
-            or "basta" in lowered_text
-            or "grazie" in lowered_text
-        ):
+        if "lascia stare" in lowered_text or "annull" in lowered_text or "basta" in lowered_text or "grazie" in lowered_text:
             new_collected = {}
+            backend_results["action_executed"] = "RESET_COMPLETED"
 
-            backend_results[
-                "action_executed"
-            ] = "RESET_COMPLETED"
-
-    # ========================================================
-    # CONSOLIDAMENTO DEGLI SLOT STORICI
-    # ========================================================
-
-    if (
-        new_collected
-        and collected.get("last_slots")
-    ):
-        historical = (
-            new_collected.get(
-                "historical_slots"
-            )
-            or []
-        )
-
-        for old_slot in collected[
-            "last_slots"
-        ]:
+    # Memorizzazione degli slot storici se la conversazione è ancora attiva
+    if new_collected and collected.get("last_slots"):
+        historical = new_collected.get("historical_slots") or []
+        for old_slot in collected["last_slots"]:
             if old_slot not in historical:
-                historical.append(
-                    old_slot
-                )
+                historical.append(old_slot)
+        new_collected["historical_slots"] = historical[-15:]
 
-        new_collected[
-            "historical_slots"
-        ] = historical[-15:]
-
-    # ========================================================
-    # STEP 3 - AI REDATTRICE
-    # ========================================================
-
-    print(
-        "[STEP 3] Invocazione AI Redattrice "
-        "con i dati reali del backend..."
-    )
-
+    # ------------------------------------------------------------
+    # STEP 3: AI REDATTRICE (Generazione della risposta WhatsApp reale)
+    # ------------------------------------------------------------
+    print("[STEP 3] Invocazione AI Redattrice con i dati reali del backend...")
     history_str = ""
+    for m in recent[-5:]:
+        role_label = "Cliente" if m.get("role") == "user" else "Assistente"
+        history_str += f"- {role_label}: {m.get('content') or m.get('text', '')}\n"
 
-for message in recent[-5:]:
-    role_label = (
-        "Cliente"
-        if message.get("role") == "user"
-        else "Assistente"
-    )
+    reply_text = run_step3_response(message_text=combined_text, backend_results=backend_results, history_text=history_str)
 
-    content = (
-        message.get("content")
-        or message.get("text", "")
-    )
+    if action_requested == "SEARCH_SLOTS" and backend_results["slot_found"]:
+        reply_text = f"{reply_text}\n{slots_text_to_append}"
+    elif action_requested == "CONFIRM_BOOKING" and backend_results["error_type"] == "slot_not_found_in_memory":
+        reply_text = "Scusami, non sono riuscito a trovare lo slot richiesto. Potresti indicarmi il numero esatto tra quelli proposti sopra?"
 
-    history_str += (
-        f"- {role_label}: {content}\n"
-    )
-
-
-    reply_text = run_step3_response(
-        message_text=combined_text,
-        backend_results=backend_results,
-        history_text=history_str,
-    )
-
-    if (
-        action_requested == "SEARCH_SLOTS"
-        and backend_results["slot_found"]
-    ):
-        reply_text = (
-            f"{reply_text}\n"
-            f"{slots_text_to_append}"
-        )
-
-    elif (
-        action_requested == "CONFIRM_BOOKING"
-        and backend_results["error_type"]
-        == "slot_not_found_in_memory"
-    ):
-        reply_text = (
-            "Scusami, non sono riuscito "
-            "a trovare lo slot richiesto. "
-            "Potresti indicarmi il numero "
-            "esatto tra quelli proposti sopra?"
-        )
-
-    # ========================================================
-    # STEP 5 - SALUTO FINALE / CONSOLIDAMENTO
-    # ========================================================
-
-    print(
-        "[STEP 5] Salvataggio finale del DB "
-        "e invio su WhatsApp Cloud API..."
-    )
-
-    update_conversation(
-        conversation["id"],
-        collected_data=new_collected,
-        workflow="idle",
-        step="none",
-    )
+    # ------------------------------------------------------------
+    # STEP 5: CONSOLIDAMENTO E STRUTTURAZIONE INVIO FINALE
+    # ------------------------------------------------------------
+    print("[STEP 5] Salvataggio finale del DB e invio su WhatsApp Cloud API...")
+    update_conversation(conversation["id"], collected_data=new_collected, workflow="idle", step="none")
 
     if reply_text:
         wa_info = tenant.get("info") or {}
-
         await send_whatsapp_message(
-            phone,
-            reply_text,
-            wa_info.get("access_token")
-            or Config.WHATSAPP_TOKEN,
-            wa_info.get("phone_number_id")
-            or Config.WHATSAPP_PHONE_NUMBER_ID,
+            phone, 
+            reply_text, 
+            wa_info.get("access_token") or Config.WHATSAPP_TOKEN, 
+            wa_info.get("phone_number_id") or Config.WHATSAPP_PHONE_NUMBER_ID
         )
-
         append_message(
-            conversation["id"],
-            role="assistant",
-            content=reply_text,
-            current_messages=conversation.get(
-                "recent_messages"
-            ),
+            conversation["id"], 
+            role="assistant", 
+            content=reply_text, 
+            current_messages=conversation.get("recent_messages")
         )
 
     print(
