@@ -227,11 +227,11 @@ async def process_messages(messages: list[dict]):
                 slots_text_to_append = "\n" + "\n".join(f"{i+1}. {label}" for i, label in enumerate(labels)) + "\n\nQuale preferisci? (puoi rispondere con il numero o con l'orario)"
             else:
                 backend_results["error_type"] = "no_slots_found"
-                if result.get("search_was_narrow"):
+            if result.get("search_was_narrow"):
                     backend_results["error_type"] = "no_slots_narrow"
-        except Exception as e:
-            print(f"[BACKEND ERROR] Errore in search_availability: {e}")
-            backend_results["error_type"] = "technical_error"
+            except Exception as e:
+                print(f"[BACKEND ERROR] Errore in search_availability: {e}")
+                backend_results["error_type"] = "technical_error"
 
     # Sotto-flusso B: Prenotazione Deterministica e Transazione (Step 4 Consolidamento)
     elif action_requested == "CONFIRM_BOOKING":
