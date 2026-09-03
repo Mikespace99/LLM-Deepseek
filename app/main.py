@@ -209,18 +209,34 @@ async def process_messages(messages: list[dict]):
     # 2. & 4. MOTORE BACKEND DETERMINISTICO
     print(f"[STEP 2/4] Elaborazione backend per: {action_requested}")
 
+# Sotto-flusso A: Ricerca Disponibilità (Blindata in app/main.py)
     if action_requested == "SEARCH_SLOTS":
-        new_collected["last_slots"] = []
-        new_collected["preferences"] = {
-            "date_from": parameters.get("date_from"),
-            "date_to": parameters.get("date_to"),
-            "time_preference": parameters.get("time_preference"),
-            "exact_time": parameters.get("exact_time"),
-            "date": None, "period": None, "weekday": None
+        # 1. Conserviamo solo la memoria storica degli slot e il servizio richiesto
+        historical_backup = new_collected.get("historical_slots") or []
+        current_service = parameters.get("service") or new_collected.get("service")
+        
+        # 2. FACCIAMO TABULA RASA COMPLETA DI TUTTO IL PASSATO A LIVELLO RADICE
+        # Questo elimina vecchi 'period', 'date' o 'weekday' che ingannavano il motore locale
+        new_collected = {
+            "service": current_service,
+            "historical_slots": historical_backup,
+            "last_slots": [],
+            "preferences": {
+                "date_from": parameters.get("date_from"),
+                "date_to": parameters.get("date_to"),
+                "time_preference": parameters.get("time_preference"),
+                "exact_time": parameters.get("exact_time"),
+                "date": None,
+                "period": None,
+                "weekday": None,
+                "ignore_preferences": None
+            }
         }
-        if parameters.get("service"):
-            new_collected["service"] = parameters.get("service")
+        
+        # Allineiamo anche l'oggetto collected locale per i metodi successivi
+        collected = deepcopy(new_collected)
 
+        # 3. Chiamata al database calendari locale con dati purificati
         try:
             booking_res = search_availability(tenant=tenant, knowledge=knowledge, collected_data=new_collected)
             slots = booking_res.get("candidate_slots") or []
