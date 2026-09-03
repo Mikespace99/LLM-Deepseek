@@ -234,7 +234,7 @@ async def process_messages(messages: list[dict]):
         }
         
         # Allineiamo anche l'oggetto collected locale per i metodi successivi
-        collected = deepcopy(new_collected)
+        collected = new_collected.copy()
 
         # 3. Chiamata al database calendari locale con dati purificati
         try:
