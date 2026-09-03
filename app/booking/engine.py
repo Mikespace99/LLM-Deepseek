@@ -733,6 +733,105 @@ def search_availability(
     )
 
 
+def revalidate_slots(
+    tenant: dict,
+    knowledge: dict,
+    collected_data: dict,
+    slots: list[dict],
+) -> list[dict]:
+    """
+    Riverifica che una lista di slot proposti in un turno precedente
+    sia ANCORA libera adesso (nessuna prenotazione concorrente nel
+    frattempo, nessuno slot ormai nel passato o sotto il min_lead_hours).
+
+    Usata dal fallback "ti ripropongo le opzioni di prima": il backend,
+    non l'AI, decide quali orari sono davvero ancora disponibili.
+    L'AI Redattrice non deve mai riscrivere a mano date/orari già
+    proposti, perché nel frattempo potrebbero non essere più validi.
+    """
+    if not slots:
+        return []
+
+    ctx = _build_context(tenant, knowledge, collected_data)
+    tz = ZoneInfo(ctx["timezone"] or "Europe/Rome")
+
+    dates = [str(s["date"])[:10] for s in slots if s.get("date")]
+
+    if not dates:
+        return []
+
+    busy_events = appointment_repo.list_busy_for_availability(
+        tenant_id=ctx["tenant_id"],
+        date_from=min(dates),
+        date_to=max(dates),
+    )
+
+    busy = []
+
+    for event in busy_events:
+        appointment_date = event.get("appointment_date")
+        appointment_time = event.get("appointment_time")
+        duration = event.get("duration_minutes") or 30
+
+        if not appointment_date or not appointment_time:
+            continue
+
+        year, month, day = (
+            int(part)
+            for part in str(appointment_date)[:10].split("-")
+        )
+
+        hour, minute = _parse_time(appointment_time)
+
+        start = datetime(
+            year, month, day, hour, minute, tzinfo=tz
+        )
+
+        busy.append((start, start + timedelta(minutes=duration)))
+
+    def overlaps_busy(start, end):
+        return any(
+            start < busy_end and end > busy_start
+            for busy_start, busy_end in busy
+        )
+
+    duration_min = ctx["duration_minutes"]
+    buffer_before = ctx["buffer_before"]
+    buffer_after = ctx["buffer_after"]
+    lead_time = timedelta(hours=ctx["min_lead_hours"])
+    now = datetime.now(tz)
+
+    valid = []
+
+    for slot in slots:
+        try:
+            year, month, day = (
+                int(part)
+                for part in str(slot["date"])[:10].split("-")
+            )
+            hour, minute = _parse_time(slot["time"])
+        except (KeyError, ValueError, TypeError):
+            continue
+
+        visit_start = datetime(
+            year, month, day, hour, minute, tzinfo=tz
+        )
+        visit_end = visit_start + timedelta(minutes=duration_min)
+
+        block_start = visit_start - timedelta(minutes=buffer_before)
+        block_end = visit_end + timedelta(minutes=buffer_after)
+
+        if visit_start < now + lead_time:
+            continue
+
+        if overlaps_busy(block_start, block_end):
+            continue
+
+        valid.append(slot)
+
+    return valid[:MAX_CANDIDATE_SLOTS]
+
+
 def create_booking(
     tenant: dict,
     knowledge: dict,
