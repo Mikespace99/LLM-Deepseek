@@ -4,25 +4,46 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Configura il tuo studio – AI Booking</title>
+  
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
     tailwind.config = {
       theme: {
         extend: {
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+          },
           colors: {
             brand: {
-              50: '#f0f9ff', 100: '#e0f2fe', 500: '#0ea5e9',
-              600: '#0284c7', 700: '#0369a1', 800: '#075985',
+              50: '#f0f9ff', 100: '#e0f2fe', 200: '#bae6fd',
+              500: '#0ea5e9', 600: '#0284c7', 700: '#0369a1', 800: '#075985',
             }
+          },
+          boxShadow: {
+            'soft': '0 2px 15px -3px rgb(0 0 0 / 0.07), 0 4px 6px -4px rgb(0 0 0 / 0.05)',
           }
         }
       }
     }
   </script>
-  <style>[x-cloak]{display:none!important}</style>
+  <style>
+    [x-cloak]{display:none!important}
+    .step-circle, .step-label, button, a, input, select, textarea {
+      transition: all 0.15s ease;
+    }
+    input:focus, select:focus, textarea:focus {
+      outline: none;
+      border-color: #0ea5e9;
+      box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.15);
+    }
+  </style>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
 </head>
-<body class="bg-gray-50 text-gray-800 min-h-screen" x-data="onboarding()" x-init="init()">
+<body class="bg-gray-50 text-gray-800 min-h-screen font-sans antialiased" x-data="onboarding()" x-init="init()">
 
   <header class="bg-white border-b border-gray-200 sticky top-0 z-30">
     <div class="max-w-6xl mx-auto px-4 sm:px-6 py-4 flex items-center justify-between">
@@ -46,25 +67,52 @@
     <div x-show="loading" class="text-center py-20 text-gray-500">Caricamento configurazione…</div>
 
     <div x-show="!loading" x-cloak>
-      <div class="mb-10">
-        <div class="flex items-center justify-between mb-3">
-          <h1 class="text-2xl font-bold text-gray-900" x-text="steps[currentStep].title"></h1>
-          <span class="text-sm text-gray-500" x-text="`Passo ${currentStep+1} di ${steps.length}`"></span>
+      
+      <div class="mb-10 sm:mb-12">
+        <div class="flex items-center justify-between mb-5 sm:mb-6">
+          <h1 class="text-xl sm:text-2xl font-bold text-gray-900 tracking-tight" x-text="steps[currentStep].title"></h1>
+          <span class="text-sm text-gray-500 font-medium tabular-nums" x-text="`Passo ${currentStep+1} di ${steps.length}`"></span>
         </div>
-        <div class="flex gap-2">
-          <template x-for="(step, idx) in steps" :key="idx">
-            <div class="flex-1 h-2 rounded-full transition-colors"
-                 :class="idx < currentStep ? 'bg-brand-500' : (idx === currentStep ? 'bg-brand-600' : 'bg-gray-200')"></div>
-          </template>
-        </div>
-        <div class="flex justify-between mt-2 text-xs text-gray-500">
-          <template x-for="(step, idx) in steps" :key="idx">
-            <span :class="idx === currentStep ? 'text-brand-700 font-medium' : ''" x-text="step.short"></span>
-          </template>
+
+        <div class="relative pt-1 pb-1">
+          <div class="absolute top-5 left-0 right-0 h-0.5 bg-gray-200 hidden sm:block" style="z-index:0;"></div>
+          <div class="absolute top-5 left-0 h-0.5 bg-brand-500 hidden sm:block transition-all duration-300"
+               :style="`width: ${(maxReachedStep / (steps.length - 1)) * 100}%; z-index:0;`"></div>
+
+          <div class="flex justify-between relative z-10">
+            <template x-for="(step, idx) in steps" :key="idx">
+              <button
+                type="button"
+                @click="goToStep(idx)"
+                class="group flex flex-col items-center focus:outline-none"
+                :class="idx === currentStep ? 'cursor-default' : 'cursor-pointer'"
+                style="min-width: 44px;"
+              >
+                <div
+                  class="step-circle w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold border-2 group-hover:scale-105"
+                  :class="{
+                    'bg-brand-600 border-brand-600 text-white shadow-md ring-4 ring-brand-100 scale-110': idx === currentStep,
+                    'bg-brand-500 border-brand-500 text-white': idx !== currentStep && idx <= maxReachedStep,
+                    'bg-white border-gray-300 text-gray-400 group-hover:border-brand-400 group-hover:text-brand-600': idx > maxReachedStep
+                  }"
+                  x-text="idx + 1"
+                ></div>
+                <span
+                  class="step-label text-[10px] sm:text-xs font-medium mt-1.5 text-center leading-tight max-w-[52px] sm:max-w-[70px]"
+                  :class="{
+                    'text-brand-700 font-semibold': idx === currentStep,
+                    'text-gray-600': idx !== currentStep && idx <= maxReachedStep,
+                    'text-gray-400 group-hover:text-brand-600': idx > maxReachedStep
+                  }"
+                  x-text="step.short"
+                ></span>
+              </button>
+            </template>
+          </div>
         </div>
       </div>
 
-      <div x-show="toast" x-cloak
+<div x-show="toast" x-cloak
            class="fixed top-4 right-4 z-50 px-4 py-3 rounded-lg shadow-lg text-sm font-medium"
            :class="toastOk ? 'bg-green-600 text-white' : 'bg-red-600 text-white'"
            x-text="toast"></div>
@@ -411,41 +459,68 @@
         </div>
         <div class="bg-brand-50 border border-brand-200 rounded-2xl p-6">
           <h3 class="font-semibold text-brand-900 mb-2">Pronto per andare live?</h3>
-          <p class="text-sm text-brand-800 mb-4">Dopo il salvataggio i dati saranno disponibili per WhatsApp e per il sistema di prenotazione.</p>
-          <button @click="save(true)" type="button" :disabled="saving"
-                  class="px-5 py-2.5 bg-brand-600 text-white font-medium rounded-lg hover:bg-brand-700 disabled:opacity-50">
-            <span x-text="saving ? 'Salvataggio…' : 'Completa configurazione e attiva'"></span>
-          </button>
+          <p class="text-sm text-brand-800">Dopo l’attivazione i dati saranno disponibili per WhatsApp e per il sistema di prenotazione. Usa il pulsante <strong>Attiva e vai online</strong> qui sotto.</p>
         </div>
       </div>
 
-      <div class="mt-8 flex items-center justify-between">
-        <button @click="prev()" type="button" :disabled="currentStep === 0"
-                class="px-5 py-2.5 rounded-lg border border-gray-300 text-gray-700 font-medium hover:bg-gray-50 disabled:opacity-40">Indietro</button>
-        <div class="flex gap-3">
-          <button @click="save(false)" type="button" :disabled="saving"
-                  class="px-5 py-2.5 rounded-lg text-gray-600 hover:bg-gray-100 font-medium disabled:opacity-50">
-            <span x-text="saving ? 'Salvo…' : 'Salva bozza'"></span>
+      
+      <!-- NAVIGATION + SAVE -->
+      <div class="mt-8 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+        <div class="flex items-center">
+          <button
+            @click="prev()"
+            type="button"
+            x-show="currentStep > 0"
+            class="px-5 py-2.5 rounded-xl border border-gray-300 text-gray-700 font-medium hover:bg-gray-50 hover:border-gray-400 w-full sm:w-auto"
+          >← Indietro</button>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-3 justify-end">
+          <button
+            @click="next()"
+            type="button"
+            x-show="currentStep < steps.length - 1"
+            class="px-5 py-2.5 rounded-xl border border-gray-300 text-gray-700 font-medium hover:bg-gray-50 hover:border-gray-400"
+          >Continua →</button>
+
+          <!-- Salva bozza – sempre visibile -->
+          <button
+            @click="save(false)"
+            type="button"
+            :disabled="saving"
+            class="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl font-medium border border-brand-600 text-brand-700 hover:bg-brand-50 disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            <span x-text="saving ? 'Salvo…' : 'Salva'"></span>
           </button>
-          <button @click="next()" type="button" x-show="currentStep < steps.length - 1"
-                  class="px-5 py-2.5 rounded-lg bg-brand-600 text-white font-medium hover:bg-brand-700">Continua</button>
+
+          <!-- Attiva solo all'ultimo step -->
+          <button
+            @click="save(true)"
+            type="button"
+            x-show="currentStep === steps.length - 1"
+            :disabled="saving"
+            class="inline-flex items-center justify-center gap-2 px-6 py-2.5 rounded-xl font-medium shadow-sm bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            <span x-text="saving ? 'Attivazione…' : 'Attiva e vai online'"></span>
+          </button>
         </div>
       </div>
+</div>
     </div>
   </div>
 
   <script>
     function onboarding() {
       return {
-        loading: true, saving: false, toast: null, toastOk: true, currentStep: 0,
+        loading: true, saving: false, toast: null, toastOk: true, currentStep: 0, maxReachedStep: 0,
         steps: [
           { title: 'Dati dello studio', short: 'Dati' },
           { title: 'Sedi', short: 'Sedi' },
           { title: 'Orari di apertura', short: 'Orari' },
           { title: 'Servizi', short: 'Servizi' },
           { title: 'Chiusure e festività', short: 'Chiusure' },
-          { title: 'Integrazioni', short: 'Integrazioni' },
-          { title: 'Anteprima e attivazione', short: 'Anteprima' },
+          { title: 'Integrazioni', short: 'API' },
+          { title: 'Anteprima e attivazione', short: 'View' },
         ],
         tenant: {
           business_name: '', specialty: '', assistant_name: 'Assistente',
@@ -538,10 +613,32 @@
           this.holidays = (data.holidays || []).map(h => ({
             ...h, enabled: thMap[h.id] !== undefined ? thMap[h.id] : true,
           }));
+          // Se il tenant ha già dati, considera tutti gli step raggiungibili
+          const hasData = !!(this.tenant.business_name || (this.locations && this.locations.length) || (this.services && this.services.length));
+          if (hasData) this.maxReachedStep = this.steps.length - 1;
+
         },
 
-        next() { if (this.currentStep < this.steps.length - 1) this.currentStep++; },
-        prev() { if (this.currentStep > 0) this.currentStep--; },
+        goToStep(idx) {
+          if (idx >= 0 && idx < this.steps.length) {
+            this.currentStep = idx;
+            if (idx > this.maxReachedStep) this.maxReachedStep = idx;
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          }
+        },
+        next() {
+          if (this.currentStep < this.steps.length - 1) {
+            this.currentStep++;
+            if (this.currentStep > this.maxReachedStep) this.maxReachedStep = this.currentStep;
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          }
+        },
+        prev() {
+          if (this.currentStep > 0) {
+            this.currentStep--;
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          }
+        },
         addLocation() {
           this.locations.push({ _key: 'new'+Date.now(), name: 'Nuova sede', city: '', address: '', active: true });
         },
