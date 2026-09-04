@@ -40,7 +40,7 @@ ITALIAN_MONTHS = [
     "dicembre",
 ]
 
-MAX_CANDIDATE_SLOTS = 5
+MAX_CANDIDATE_SLOTS = 3
 
 _WEEKDAY_NAME_TO_ISO = {
     "lunedì": 1,
@@ -997,6 +997,13 @@ def create_booking(
                     "error": "slot_conflict",
                 },
             }
+
+        # Qualunque altro errore (vincolo diverso, dato non valido, timeout...)
+        # NON è un conflitto di orario: va loggato per intero lato server,
+        # perché il chiamante lo deve poter distinguere da uno slot
+        # davvero occupato invece di raccontare all'utente una bugia
+        # innocente ("è già occupato") che nasconde il problema reale.
+        print(f"[BOOKING ERROR] create_appointment ha fallito per un motivo non previsto: {exc!r}")
 
         return {
             "selected_slot": slot,
