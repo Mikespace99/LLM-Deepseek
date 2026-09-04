@@ -4,6 +4,7 @@ import hmac
 import json
 import re
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
@@ -66,6 +67,60 @@ def _looks_like_greeting(text: str) -> bool:
     proposta di slot già in corso.
     """
     return bool(_GREETING_PATTERN.match((text or "").strip()))
+
+
+def _time_of_day_greeting(tz_name: str | None) -> str:
+    """
+    Sceglie il saluto corretto in base all'ora locale reale del tenant.
+    Calcolo deterministico (mai lasciato all'AI, che non ha un orologio
+    affidabile): 05:00-13:00 Buongiorno, 13:00-19:00 Buon pomeriggio,
+    19:00-05:00 Buonasera.
+    """
+    try:
+        tz = ZoneInfo(tz_name or "Europe/Rome")
+    except Exception:
+        tz = ZoneInfo("Europe/Rome")
+
+    hour = datetime.now(tz).hour
+
+    if 5 <= hour < 13:
+        return "Buongiorno"
+    elif 13 <= hour < 19:
+        return "Buon pomeriggio"
+    else:
+        return "Buonasera"
+
+
+def _normalize_time_str(value) -> str | None:
+    """
+    Normalizza un orario espresso in forme diverse ("17", "17.30",
+    "17:30") nel formato "HH:MM" usato dagli slot, per un confronto
+    di coerenza affidabile. Ritorna None se non interpretabile.
+    """
+    if not value:
+        return None
+
+    text = str(value).strip().replace(".", ":").replace(",", ":")
+
+    if ":" not in text:
+        if not text.isdigit():
+            return None
+        text = f"{text}:00"
+
+    parts = text.split(":")
+    if len(parts) != 2:
+        return None
+
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+    except ValueError:
+        return None
+
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+
+    return f"{hour:02d}:{minute:02d}"
 
 
 def _slot_labels(slots: list) -> list[str]:
@@ -348,6 +403,13 @@ async def process_messages(messages: list[dict]):
     ):
         conversation["collected_data"] = {}
 
+    # Vale sia per una conversazione davvero nuova (o scaduta, azzerata
+    # da get_or_create_conversation) sia per il reset da saluto qui
+    # sopra: in entrambi i casi non c'è nulla in "collected_data" e la
+    # prima risposta di questo scambio deve aprirsi con il saluto giusto
+    # per l'orario, calcolato dal backend (mai dall'AI).
+    is_conversation_start = not bool(conversation.get("collected_data"))
+
     knowledge = get_tenant_knowledge(tenant_id)
     context = build_context(
         tenant=tenant, 
@@ -380,7 +442,9 @@ async def process_messages(messages: list[dict]):
         "booking_success": False,
         "is_studio_closed": False,
         "is_studio_full": False,
-        "error_type": None
+        "error_type": None,
+        "confirmed_slot_label": None,
+        "failed_slot_label": None,
     }
     slots_text_to_append = ""
 
@@ -468,24 +532,56 @@ async def process_messages(messages: list[dict]):
         else:
             slot_number = parameters.get("slot_number")
             exact_time = parameters.get("exact_time")
+            pending = new_collected.get("pending_confirmation_slot")
 
             resolved_slot = None
+            mismatch_slot = None
 
-            if slot_number is not None:
+            if slot_number is None and exact_time is None and pending:
+                # Il cliente sta confermando la proposta di chiarimento
+                # fatta nel turno precedente (es. "sì", "confermo").
+                resolved_slot = pending
+
+            elif slot_number is not None:
+                candidate = None
                 try:
                     idx = int(slot_number) - 1
                     if 0 <= idx < len(new_collected.get("last_slots", [])):
-                        resolved_slot = new_collected["last_slots"][idx]
+                        candidate = new_collected["last_slots"][idx]
                 except (TypeError, ValueError):
                     pass
+
+                if candidate:
+                    wanted = _normalize_time_str(exact_time)
+                    # Verifica di coerenza completa: se il cliente ha
+                    # indicato ANCHE un orario esplicito, deve coincidere
+                    # con quello vero dello slot scelto per numero. Se
+                    # non coincide, non prenotiamo alla cieca: chiediamo
+                    # conferma citando l'orario reale (verità di backend,
+                    # mai improvvisata dall'AI).
+                    if wanted and candidate.get("time") != wanted:
+                        mismatch_slot = candidate
+                    else:
+                        resolved_slot = candidate
+
             elif exact_time:
-                wanted = str(exact_time).strip()
+                wanted = _normalize_time_str(exact_time)
                 for slot in all_slots_in_memory:
-                    if slot.get("time") == wanted or wanted in slot.get("label", ""):
+                    if wanted and slot.get("time") == wanted:
                         resolved_slot = slot
                         break
 
-            if resolved_slot:
+            # La proposta di chiarimento in sospeso vale per un solo
+            # turno: la consumiamo qui, sia che sia stata confermata sia
+            # che sia stata superata da una nuova scelta esplicita.
+            new_collected["pending_confirmation_slot"] = None
+
+            if mismatch_slot:
+                backend_results["error_type"] = "slot_time_mismatch"
+                backend_results["mismatch_slot_label"] = _slot_labels([mismatch_slot])[0]
+                new_collected["pending_confirmation_slot"] = mismatch_slot
+
+            elif resolved_slot:
                 new_collected["selected_slot"] = resolved_slot
                 if parameters.get("person_name"):
                     new_collected["person_name"] = parameters.get("person_name")
@@ -498,11 +594,28 @@ async def process_messages(messages: list[dict]):
                         customer=customer, 
                         phone_number=phone
                     )
-                    if booking_res.get("result", {}).get("success"):
+                    result = booking_res.get("result") or {}
+
+                    if result.get("success"):
                         backend_results["booking_success"] = True
+                        backend_results["confirmed_slot_label"] = _slot_labels([resolved_slot])[0]
                         new_collected = {}
                     else:
-                        backend_results["error_type"] = "slot_occupied"
+                        # Distinguiamo SEMPRE il motivo reale: un vero
+                        # conflitto ("slot_conflict") non è la stessa cosa
+                        # di un dato mancante o di un errore tecnico
+                        # diverso — raccontare sempre "è già occupato" a
+                        # prescindere nasconderebbe il problema vero.
+                        error = result.get("error")
+                        backend_results["failed_slot_label"] = _slot_labels([resolved_slot])[0]
+
+                        if error == "slot_conflict":
+                            backend_results["error_type"] = "slot_occupied"
+                        elif error == "missing_data":
+                            backend_results["error_type"] = "missing_data"
+                        else:
+                            backend_results["error_type"] = "technical_error"
+                            print(f"[BACKEND ERROR] create_booking fallita per un motivo non atteso: {error}")
                 except Exception as e:
                     print(f"[BACKEND ERROR] Errore in create_booking: {e}")
                     backend_results["error_type"] = "technical_error"
@@ -548,6 +661,23 @@ async def process_messages(messages: list[dict]):
         reply_text = "Scusami, non sono riuscito a trovare lo slot richiesto. Potresti indicarmi il numero esatto tra quelli proposti sopra?"
     elif action_requested == "CONFIRM_BOOKING" and backend_results["error_type"] == "no_context_available":
         reply_text = tpl.CONVERSATION_EXPIRED
+    elif action_requested == "CONFIRM_BOOKING" and backend_results["error_type"] == "slot_time_mismatch":
+        # Verifica di coerenza slot/orario: messaggio interamente
+        # deterministico, mai improvvisato dall'AI, che cita la verità
+        # esatta dello slot risolto per numero.
+        label = backend_results.get("mismatch_slot_label")
+        reply_text = (
+            f"Attenzione: lo slot indicato corrisponde in realtà a {label}, non all'orario che hai scritto. "
+            f"Confermi {label}? Rispondi 'sì' per confermare, oppure scegli un altro slot tra quelli proposti."
+        )
+
+    # Il saluto iniziale ("Buongiorno"/"Buon pomeriggio"/"Buonasera") è
+    # calcolato qui dal backend in base all'ora locale reale del tenant,
+    # non lasciato all'AI, e antepposto SOLO al primo messaggio di una
+    # conversazione nuova (o resettata da un saluto del cliente).
+    if is_conversation_start and reply_text:
+        greeting = _time_of_day_greeting(tenant.get("timezone"))
+        reply_text = f"{greeting}! {reply_text}"
 
     # ------------------------------------------------------------
     # STEP 5: CONSOLIDAMENTO E STRUTTURAZIONE INVIO FINALE
