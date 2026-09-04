@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import re
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request
@@ -18,6 +19,12 @@ from app.booking.engine import (
     search_availability,
 )
 from app.config import Config
+from app.constants import (
+    STEP_NONE,
+    STEP_SHOWING_SLOTS,
+    WORKFLOW_BOOKING,
+    WORKFLOW_IDLE,
+)
 from app.context.builder import build_context
 from app.integrations.whatsapp import send_whatsapp_message
 from app.message_buffer import message_buffer
@@ -43,6 +50,22 @@ app = FastAPI(
 )
 
 app.include_router(web_router)
+
+
+_GREETING_PATTERN = re.compile(
+    r"^\s*(buon\s*giorno|buon\s*d[ìi]|buona\s*sera|buon\s*pomeriggio|salve|ciao)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_greeting(text: str) -> bool:
+    """
+    Rilevamento deterministico (NIENTE AI) di un saluto di apertura
+    tipico italiano a inizio messaggio. Usato come segnale che il
+    cliente sta iniziando una richiesta nuova, non rispondendo a una
+    proposta di slot già in corso.
+    """
+    return bool(_GREETING_PATTERN.match((text or "").strip()))
 
 
 def _slot_labels(slots: list) -> list[str]:
@@ -301,22 +324,29 @@ async def process_messages(messages: list[dict]):
         recent = append_message(conversation["id"], role="user", content=m["message"], current_messages=recent)
     conversation["recent_messages"] = recent
 
-    # Gestione della sessione scaduta
-    if expired:
-        wa_info = tenant.get("info") or {}
-        await send_whatsapp_message(
-            phone, 
-            tpl.CONVERSATION_EXPIRED, 
-            wa_info.get("access_token") or Config.WHATSAPP_TOKEN, 
-            wa_info.get("phone_number_id") or Config.WHATSAPP_PHONE_NUMBER_ID
-        )
-        append_message(
-            conversation["id"], 
-            role="assistant", 
-            content=tpl.CONVERSATION_EXPIRED, 
-            current_messages=conversation.get("recent_messages")
-        )
-        return
+    # La sessione precedente è scaduta: get_or_create_conversation ha già
+    # creato un nuovo record vuoto (collected_data={}). Non blocchiamo più
+    # la risposta qui: se il messaggio è autosufficiente (es. "vorrei un
+    # appuntamento per giovedì prossimo") lo elaboriamo comunque. Se invece
+    # dipende da un contesto che non abbiamo più (es. "confermo lo slot 3"),
+    # ce ne accorgiamo più sotto, quando CONFIRM_BOOKING non trova nulla in
+    # memoria, e SOLO in quel caso chiediamo di ripetere la richiesta.
+
+    # Segnale di "nuova richiesta": un saluto di apertura ("Buongiorno",
+    # "Salve", ...) mentre NON c'è una proposta di slot in sospeso
+    # (workflow != booking) significa che il cliente sta iniziando da
+    # capo. Azzeriamo tutto (preferenze di ricerca, servizio, slot
+    # mostrati) PRIMA di costruire il contesto per l'AI, così Step 1 non
+    # vede nemmeno le vecchie preferenze e non può "mantenerle". Il
+    # segnale qui è il contenuto del messaggio, non il tempo trascorso.
+    # Se invece c'è una proposta in sospeso, un saluto è solo educazione
+    # (es. "Buongiorno, il 3 va bene") e NON deve cancellare last_slots.
+    if (
+        conversation.get("collected_data")
+        and _looks_like_greeting(combined_text)
+        and conversation.get("workflow") != WORKFLOW_BOOKING
+    ):
+        conversation["collected_data"] = {}
 
     knowledge = get_tenant_knowledge(tenant_id)
     context = build_context(
@@ -427,49 +457,57 @@ async def process_messages(messages: list[dict]):
 
     # Sotto-flusso B: Prenotazione Deterministica e Transazione (Step 4)
     elif action_requested == "CONFIRM_BOOKING":
-        slot_number = parameters.get("slot_number")
-        exact_time = parameters.get("exact_time")
-        
-        resolved_slot = None
         all_slots_in_memory = (new_collected.get("last_slots") or []) + (new_collected.get("historical_slots") or [])
-        
-        if slot_number is not None:
-            try:
-                idx = int(slot_number) - 1
-                if 0 <= idx < len(new_collected.get("last_slots", [])):
-                    resolved_slot = new_collected["last_slots"][idx]
-            except (TypeError, ValueError):
-                pass
-        elif exact_time:
-            wanted = str(exact_time).strip()
-            for slot in all_slots_in_memory:
-                if slot.get("time") == wanted or wanted in slot.get("label", ""):
-                    resolved_slot = slot
-                    break
 
-        if resolved_slot:
-            new_collected["selected_slot"] = resolved_slot
-            if parameters.get("person_name"):
-                new_collected["person_name"] = parameters.get("person_name")
-            
-            try:
-                booking_res = create_booking(
-                    tenant=tenant, 
-                    knowledge=knowledge, 
-                    collected_data=new_collected, 
-                    customer=customer, 
-                    phone_number=phone
-                )
-                if booking_res.get("result", {}).get("success"):
-                    backend_results["booking_success"] = True
-                    new_collected = {}
-                else:
-                    backend_results["error_type"] = "slot_occupied"
-            except Exception as e:
-                print(f"[BACKEND ERROR] Errore in create_booking: {e}")
-                backend_results["error_type"] = "technical_error"
+        if not all_slots_in_memory:
+            # Non c'è proprio nulla da risolvere (sessione azzerata per
+            # saluto o per scadenza): non ha senso interpretare "slot 3"
+            # o un orario, non sappiamo a cosa si riferiscano. Chiediamo
+            # di ripetere la richiesta da capo invece di indovinare.
+            backend_results["error_type"] = "no_context_available"
         else:
-            backend_results["error_type"] = "slot_not_found_in_memory"
+            slot_number = parameters.get("slot_number")
+            exact_time = parameters.get("exact_time")
+
+            resolved_slot = None
+
+            if slot_number is not None:
+                try:
+                    idx = int(slot_number) - 1
+                    if 0 <= idx < len(new_collected.get("last_slots", [])):
+                        resolved_slot = new_collected["last_slots"][idx]
+                except (TypeError, ValueError):
+                    pass
+            elif exact_time:
+                wanted = str(exact_time).strip()
+                for slot in all_slots_in_memory:
+                    if slot.get("time") == wanted or wanted in slot.get("label", ""):
+                        resolved_slot = slot
+                        break
+
+            if resolved_slot:
+                new_collected["selected_slot"] = resolved_slot
+                if parameters.get("person_name"):
+                    new_collected["person_name"] = parameters.get("person_name")
+
+                try:
+                    booking_res = create_booking(
+                        tenant=tenant, 
+                        knowledge=knowledge, 
+                        collected_data=new_collected, 
+                        customer=customer, 
+                        phone_number=phone
+                    )
+                    if booking_res.get("result", {}).get("success"):
+                        backend_results["booking_success"] = True
+                        new_collected = {}
+                    else:
+                        backend_results["error_type"] = "slot_occupied"
+                except Exception as e:
+                    print(f"[BACKEND ERROR] Errore in create_booking: {e}")
+                    backend_results["error_type"] = "technical_error"
+            else:
+                backend_results["error_type"] = "slot_not_found_in_memory"
 
     # Sotto-flusso C: Chiacchiere, Saluti o Annullamento
     else:
@@ -508,12 +546,23 @@ async def process_messages(messages: list[dict]):
         reply_text = f"{reply_text}\n{slots_text_to_append}"
     elif action_requested == "CONFIRM_BOOKING" and backend_results["error_type"] == "slot_not_found_in_memory":
         reply_text = "Scusami, non sono riuscito a trovare lo slot richiesto. Potresti indicarmi il numero esatto tra quelli proposti sopra?"
+    elif action_requested == "CONFIRM_BOOKING" and backend_results["error_type"] == "no_context_available":
+        reply_text = tpl.CONVERSATION_EXPIRED
 
     # ------------------------------------------------------------
     # STEP 5: CONSOLIDAMENTO E STRUTTURAZIONE INVIO FINALE
     # ------------------------------------------------------------
     print("[STEP 5] Salvataggio finale del DB e invio su WhatsApp Cloud API...")
-    update_conversation(conversation["id"], collected_data=new_collected, workflow="idle", step="none")
+    # Il workflow riflette ora lo stato reale: "booking" con una proposta
+    # di slot in attesa di scelta, "idle" in ogni altro caso. Prima veniva
+    # sempre forzato a "idle", rendendo lo stato inutilizzabile come
+    # segnale (es. per il rilevamento del saluto qui sopra).
+    if action_requested == "SEARCH_SLOTS" and backend_results["slot_found"]:
+        workflow_to_save, step_to_save = WORKFLOW_BOOKING, STEP_SHOWING_SLOTS
+    else:
+        workflow_to_save, step_to_save = WORKFLOW_IDLE, STEP_NONE
+
+    update_conversation(conversation["id"], collected_data=new_collected, workflow=workflow_to_save, step=step_to_save)
 
     if reply_text:
         wa_info = tenant.get("info") or {}
