@@ -530,16 +530,40 @@ async def process_messages(messages: list[dict]):
             # di ripetere la richiesta da capo invece di indovinare.
             backend_results["error_type"] = "no_context_available"
         else:
+            # Accumulo persistente (lato backend, non lato AI): se il
+            # cliente ha già indicato un numero e/o un orario in un
+            # turno precedente di questa stessa negoziazione, li
+            # ricordiamo qui e li aggiorniamo solo quando il messaggio
+            # corrente ne porta uno nuovo. Così la verifica di coerenza
+            # regge anche se i due segnali arrivano in messaggi diversi
+            # (es. "slot 2 alle 17" -> poi solo "Mario Rossi" per il
+            # nome), invece di dipendere dalla capacità dello Step 1 di
+            # ricostruire tutto da zero dalla cronologia grezza a ogni
+            # turno.
             slot_number = parameters.get("slot_number")
+            if slot_number is None:
+                slot_number = new_collected.get("pending_slot_number")
+
             exact_time = parameters.get("exact_time")
+            if not exact_time:
+                exact_time = new_collected.get("pending_exact_time")
+
+            new_collected["pending_slot_number"] = slot_number
+            new_collected["pending_exact_time"] = exact_time
+
             pending = new_collected.get("pending_confirmation_slot")
 
             resolved_slot = None
             mismatch_slot = None
 
-            if slot_number is None and exact_time is None and pending:
+            if (
+                parameters.get("slot_number") is None
+                and not parameters.get("exact_time")
+                and pending
+            ):
                 # Il cliente sta confermando la proposta di chiarimento
-                # fatta nel turno precedente (es. "sì", "confermo").
+                # fatta nel turno precedente (es. "sì", "confermo"), senza
+                # ripetere un numero/orario nuovo in questo messaggio.
                 resolved_slot = pending
 
             elif slot_number is not None:
@@ -580,6 +604,11 @@ async def process_messages(messages: list[dict]):
                 backend_results["error_type"] = "slot_time_mismatch"
                 backend_results["mismatch_slot_label"] = _slot_labels([mismatch_slot])[0]
                 new_collected["pending_confirmation_slot"] = mismatch_slot
+                # Passiamo alla domanda di chiarimento: da qui in poi la
+                # conferma passa da pending_confirmation_slot, non serve
+                # più tenere in memoria il numero/orario grezzi.
+                new_collected["pending_slot_number"] = None
+                new_collected["pending_exact_time"] = None
 
             elif resolved_slot:
                 new_collected["selected_slot"] = resolved_slot
@@ -611,8 +640,17 @@ async def process_messages(messages: list[dict]):
 
                         if error == "slot_conflict":
                             backend_results["error_type"] = "slot_occupied"
+                            # Quello slot specifico non è più valido:
+                            # non ha senso ritentarlo automaticamente,
+                            # il cliente deve sceglierne un altro.
+                            new_collected["pending_slot_number"] = None
+                            new_collected["pending_exact_time"] = None
                         elif error == "missing_data":
                             backend_results["error_type"] = "missing_data"
+                            # Lo slot resta valido: manca solo il nome.
+                            # Teniamo pending_slot_number/exact_time così
+                            # il prossimo turno (che darà solo il nome)
+                            # non deve essere re-interpretato da capo.
                         else:
                             backend_results["error_type"] = "technical_error"
                             print(f"[BACKEND ERROR] create_booking fallita per un motivo non atteso: {error}")
@@ -621,6 +659,8 @@ async def process_messages(messages: list[dict]):
                     backend_results["error_type"] = "technical_error"
             else:
                 backend_results["error_type"] = "slot_not_found_in_memory"
+                new_collected["pending_slot_number"] = None
+                new_collected["pending_exact_time"] = None
 
     # Sotto-flusso C: Chiacchiere, Saluti o Annullamento
     else:
