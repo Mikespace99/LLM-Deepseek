@@ -82,6 +82,7 @@ REGOLE DI SELEZIONE RIGIDE:
    - Un giorno preciso nominato dal cliente ("lunedì", "martedì", ... "mercoledì", eventualmente con "prossimo") -> valorizza SOLO "weekday" con il nome del giorno; NON calcolare tu la data corrispondente.
 3. FORMULE DI CORTESIA: parole come "buongiorno", "buon pomeriggio" o "buonasera" all'inizio del testo sono solo saluti. NON usarle come filtro orario (pomeriggio/mattina), lasciale a null a meno che non sia specificato esplicitamente ("vengo di pomeriggio").
 4. ANNULLAMENTI: se l'utente dice "lascia stare", "annulla tutto" o "non voglio più prenotare", imposta action_requested="JUST_TALK".
+5. SELEZIONE DI UNO SLOT PROPOSTO: se il cliente, nel messaggio corrente, nomina SIA un numero (es. "slot 2", "il numero 4", "il 2") SIA un orario esplicito (es. "alle 17", "quello delle 15"), valorizza SEMPRE ENTRAMBI i campi "slot_number" ed "exact_time" con quello che ha effettivamente scritto — anche se a te sembrano in conflitto tra loro (es. "slot 2 alle 17" quando lo slot 2 proposto era in realtà alle 12:30). NON scegliere tu quale dei due sia quello "giusto" e non correggere né ignorare l'altro: sarà il backend a verificare la coerenza e a chiedere conferma in caso di discrepanza. Riporta sempre fedelmente ciò che il cliente ha scritto, mai la tua interpretazione di cosa intendesse davvero.
 
 Rispondi escludendo qualsiasi testo di contorno, restituisci solo il JSON pulito.
 """.strip()
