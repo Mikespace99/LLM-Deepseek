@@ -18,6 +18,8 @@ Convenzioni:
 
 from __future__ import annotations
 
+from datetime import date
+
 from app.supabase_client import get_supabase
 
 
@@ -117,6 +119,34 @@ def list_busy_for_availability(tenant_id: str, date_from: str, date_to: str) -> 
         .eq("status", "confirmed")
         .gte("appointment_date", date_from)
         .lte("appointment_date", date_to)
+        .execute()
+    )
+    return res.data or []
+
+
+def list_upcoming_for_customer(
+    tenant_id: str,
+    customer_id: str,
+    limit: int = 2,
+) -> list[dict]:
+    """
+    Prossimi appuntamenti 'confirmed' e futuri di un cliente, ordinati
+    per data/ora crescente. Usata dal flusso di modifica appuntamento
+    (WhatsApp) per identificare quale spostare senza dover chiedere al
+    cliente di ripetere data/ora che il sistema conosce già.
+    """
+    sb = get_supabase()
+    today = date.today().isoformat()
+    res = (
+        sb.table("appointments")
+        .select("id, appointment_date, appointment_time, duration_minutes, service, service_id")
+        .eq("tenant_id", tenant_id)
+        .eq("customer_id", customer_id)
+        .eq("status", "confirmed")
+        .gte("appointment_date", today)
+        .order("appointment_date")
+        .order("appointment_time")
+        .limit(limit)
         .execute()
     )
     return res.data or []
