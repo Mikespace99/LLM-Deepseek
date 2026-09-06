@@ -50,7 +50,7 @@ Il tuo unico compito è CLASSIFICARE la richiesta del cliente e la cronologia re
 
 Devi restituire TASSATIVAMENTE ed ESCLUSIVAMENTE un JSON valido con questa struttura:
 {
-  "action_requested": "SEARCH_SLOTS" o "CONFIRM_BOOKING" o "JUST_TALK",
+  "action_requested": "SEARCH_SLOTS" o "CONFIRM_BOOKING" o "MODIFY_BOOKING" o "JUST_TALK",
   "parameters": {
     "period": "today" o "tomorrow" o "this_week" o "next_week" o null,
     "week_part": "start" o "mid" o "weekend" o null,
@@ -61,7 +61,8 @@ Devi restituire TASSATIVAMENTE ed ESCLUSIVAMENTE un JSON valido con questa strut
     "exact_time": "HH:MM o null",
     "slot_number": intero o null (1, 2, 3...),
     "service": "stringa o null",
-    "person_name": "stringa o null"
+    "person_name": "stringa o null",
+    "confirmation": "yes" o "no" o null
   }
 }
 
@@ -83,6 +84,8 @@ REGOLE DI SELEZIONE RIGIDE:
 3. FORMULE DI CORTESIA: parole come "buongiorno", "buon pomeriggio" o "buonasera" all'inizio del testo sono solo saluti. NON usarle come filtro orario (pomeriggio/mattina), lasciale a null a meno che non sia specificato esplicitamente ("vengo di pomeriggio").
 4. ANNULLAMENTI: se l'utente dice "lascia stare", "annulla tutto" o "non voglio più prenotare", imposta action_requested="JUST_TALK".
 5. SELEZIONE DI UNO SLOT PROPOSTO: se il cliente, nel messaggio corrente, nomina SIA un numero (es. "slot 2", "il numero 4", "il 2") SIA un orario esplicito (es. "alle 17", "quello delle 15"), valorizza SEMPRE ENTRAMBI i campi "slot_number" ed "exact_time" con quello che ha effettivamente scritto — anche se a te sembrano in conflitto tra loro (es. "slot 2 alle 17" quando lo slot 2 proposto era in realtà alle 12:30). NON scegliere tu quale dei due sia quello "giusto" e non correggere né ignorare l'altro: sarà il backend a verificare la coerenza e a chiedere conferma in caso di discrepanza. Riporta sempre fedelmente ciò che il cliente ha scritto, mai la tua interpretazione di cosa intendesse davvero.
+6. MODIFICA DI UN APPUNTAMENTO ESISTENTE: se il cliente esprime la volontà di spostare, cambiare o riprogrammare un appuntamento GIÀ FISSATO (es. "vorrei spostare il mio appuntamento", "quel giorno non posso, si può cambiare?", "devo spostare l'appuntamento di mercoledì"), imposta action_requested="MODIFY_BOOKING". Non devi individuare tu QUALE appuntamento intende: ci pensa il backend, che conosce già gli appuntamenti del cliente. Se nello stesso messaggio il cliente indica anche una nuova preferenza di giorno/orario (es. "spostalo a giovedì pomeriggio"), valorizza comunque i normali campi period/weekday/week_part/time_preference/exact_time come faresti per una ricerca normale.
+7. RISPOSTE A UNA DOMANDA DI CONFERMA SÌ/NO: se l'ultimo messaggio dell'assistente (visibile nella cronologia) ha posto una domanda con risposta sì/no (es. "È questo l'appuntamento che vuoi spostare?", "Confermi le 15:30?"), classifica la risposta del cliente in "confirmation": "yes" se accetta/conferma (anche solo "sì", "esatto", "va bene", o se prosegue dando altre informazioni senza contraddire), "no" se rifiuta/nega esplicitamente (es. "no", "non quello", "è un altro"). Se il messaggio corrente non è una risposta a una domanda di conferma, lascia "confirmation" a null.
 
 Rispondi escludendo qualsiasi testo di contorno, restituisci solo il JSON pulito.
 """.strip()
@@ -142,6 +145,7 @@ GESTIONE DEI RISULTATI DEL CALENDARIO:
    - In questo caso NON esistono più opzioni valide da riproporre (il backend le ha già cercate e riverificate senza successo): non menzionare mai orari, date o "opzioni di prima" scritti a mano, anche se li vedi nella cronologia della chat.
 4. SE IL BACKEND CONFERMA IL SUCCESSO DI UN APPUNTAMENTO (booking_success = True):
    Genera un messaggio di successo caloroso e professionale. Usa 'confirmed_slot_label' (fornito dal backend, è la verità esatta) per il riepilogo di Giorno e Ora, insieme a Servizio e Nome dell'intestatario.
+   Se è presente anche 'cancelled_old_appointment_label', il messaggio deve comunicare che l'appuntamento è stato SPOSTATO (non che è una prenotazione nuova): menziona sia il vecchio orario ('cancelled_old_appointment_label') sia il nuovo ('confirmed_slot_label').
 5. SE È UN TENTATIVO DI CONFERMA APPUNTAMENTO FALLITO (action_executed = CONFIRM_BOOKING, booking_success = False):
    - Se 'error_type' è 'slot_occupied': quello specifico orario è stato appena occupato da qualcun altro. Usa 'failed_slot_label' (fornito dal backend, è la verità esatta: NON usare orari che hai visto scritti dal cliente nel messaggio) per dire con precisione quale orario non è più disponibile, e invita a sceglierne un altro tra quelli già proposti sopra.
    - Se 'error_type' è 'missing_data': manca un'informazione necessaria (tipicamente il nome dell'intestatario). Chiedi gentilmente il dato mancante.
