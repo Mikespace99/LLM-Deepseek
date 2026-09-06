@@ -214,6 +214,58 @@ def _appointment_label(appt: dict) -> str:
         return f"{date_str} alle {time_str}"
 
 
+def _describe_search_criteria(parameters: dict) -> str | None:
+    """
+    Descrizione testuale del criterio di ricerca ORIGINALE (quello
+    richiesto, non quello dedotto dai risultati), calcolata dal backend
+    dagli stessi parametri usati per la ricerca. Passata allo Step 3
+    perché l'introduzione rifletta sempre cosa è stato chiesto, non un
+    giorno dedotto guardando quali slot sono usciti — es. una ricerca su
+    "la prossima settimana" i cui unici risultati liberi cadono di
+    mercoledì non deve diventare "ecco le disponibilità per mercoledì".
+    """
+    period = parameters.get("period")
+    weekday = parameters.get("weekday")
+    week_part = parameters.get("week_part")
+    date_from = parameters.get("date_from")
+    date_to = parameters.get("date_to")
+    time_pref = parameters.get("time_preference")
+
+    if weekday:
+        base = f"{weekday} prossimo" if period == "next_week" else weekday
+    elif date_from and date_to and date_from == date_to:
+        base = f"il {date_from}"
+    elif date_from and date_to:
+        base = f"dal {date_from} al {date_to}"
+    elif week_part == "start":
+        base = "l'inizio della prossima settimana" if period == "next_week" else "l'inizio settimana"
+    elif week_part == "mid":
+        base = "metà della prossima settimana" if period == "next_week" else "metà settimana"
+    elif week_part == "weekend":
+        base = "il weekend prossimo" if period == "next_week" else "il weekend"
+    elif period == "today":
+        base = "oggi"
+    elif period == "tomorrow":
+        base = "domani"
+    elif period == "this_week":
+        base = "questa settimana"
+    elif period == "next_week":
+        base = "la prossima settimana"
+    else:
+        base = None
+
+    if not base:
+        return None
+
+    time_suffix = {
+        "morning": " di mattina",
+        "afternoon": " di pomeriggio",
+        "evening": " di sera",
+    }.get(time_pref, "")
+
+    return f"{base}{time_suffix}"
+
+
 def _resolve_search_slots(
     tenant: dict,
     knowledge: dict,
@@ -234,6 +286,8 @@ def _resolve_search_slots(
     historical_backup = new_collected.get("historical_slots") or []
     modifying_backup = new_collected.get("modifying_appointment")
     current_service = parameters.get("service") or new_collected.get("service")
+
+    backend_results["search_criteria_label"] = _describe_search_criteria(parameters)
 
     # Pialliamo i residui feriali a livello radice
     new_collected = {
@@ -646,6 +700,22 @@ async def process_messages(messages: list[dict]):
                         mismatch_slot = candidate
                     else:
                         resolved_slot = candidate
+                elif exact_time is None:
+                    # "slot_number" non è un indice valido tra quelli
+                    # proposti (es. il cliente ha scritto "10" intendendo
+                    # le 10:00, non "opzione 10", e non c'era nessun altro
+                    # indizio testuale di orario da riportare come
+                    # exact_time separato). Lo accettiamo SOLO se combacia
+                    # esattamente con l'orario di uno slot realmente
+                    # proposto: se non c'è corrispondenza, l'ambiguità non
+                    # si risolve da sola e si ricade nel messaggio
+                    # "non trovato" più sotto.
+                    as_time = _normalize_time_str(slot_number)
+                    if as_time:
+                        for slot in all_slots_in_memory:
+                            if slot.get("time") == as_time:
+                                resolved_slot = slot
+                                break
 
             elif exact_time:
                 wanted = _normalize_time_str(exact_time)
