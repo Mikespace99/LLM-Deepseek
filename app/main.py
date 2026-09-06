@@ -793,9 +793,14 @@ async def process_messages(messages: list[dict]):
                         elif error == "missing_data":
                             backend_results["error_type"] = "missing_data"
                             # Lo slot resta valido: manca solo il nome.
-                            # Teniamo pending_slot_number/exact_time così
-                            # il prossimo turno (che darà solo il nome)
-                            # non deve essere re-interpretato da capo.
+                            # Ripopoliamo SEMPRE pending_confirmation_slot
+                            # con lo slot appena risolto (indipendentemente
+                            # da come ci siamo arrivati: per numero,
+                            # orario, o conferma di un chiarimento), così
+                            # il prossimo turno - che darà solo il nome -
+                            # lo ritrova in automatico, senza dover essere
+                            # ricostruito dall'AI leggendo la cronologia.
+                            new_collected["pending_confirmation_slot"] = resolved_slot
                         else:
                             backend_results["error_type"] = "technical_error"
                             print(f"[BACKEND ERROR] create_booking fallita per un motivo non atteso: {error}")
