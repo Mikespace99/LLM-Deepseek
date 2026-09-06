@@ -913,42 +913,72 @@ async def process_messages(messages: list[dict]):
     # ------------------------------------------------------------
     # STEP 3: AI REDATTRICE (Generazione della risposta WhatsApp reale)
     # ------------------------------------------------------------
-    print("[STEP 3] Invocazione AI Redattrice con i dati reali del backend...")
     history_str = ""
     for m in recent[-5:]:
         role_label = "Cliente" if m.get("role") == "user" else "Assistente"
         history_str += f"- {role_label}: {m.get('content') or m.get('text', '')}\n"
 
-    reply_text = run_step3_response(message_text=combined_text, backend_results=backend_results, history_text=history_str)
+    # Ogni esito di CONFIRM_BOOKING, e i casi di identificazione/errore
+    # tecnico di MODIFY_BOOKING, sono già coperti da un messaggio fisso
+    # in app/templates/messages.py qui sotto: sono i momenti in cui la
+    # precisione dei dati (soldi/tempo delle persone) conta più del tono,
+    # quindi evitiamo del tutto la scrittura libera dell'AI, invece di
+    # generarla e poi scartarla. L'AI resta usata solo per l'introduzione
+    # a una ricerca slot riuscita e per le chiacchiere/saluti, dove un
+    # po' di variabilità naturale è un valore, non un rischio.
+    _DETERMINISTIC_MODIFY_ERROR_TYPES = {
+        "no_appointment_to_modify",
+        "appointment_confirmation_needed",
+        "no_more_appointments_to_propose",
+        "ask_new_time_preference",
+    }
+    skip_ai_response = (
+        action_requested == "CONFIRM_BOOKING"
+        or (
+            action_requested == "MODIFY_BOOKING"
+            and backend_results.get("error_type") in _DETERMINISTIC_MODIFY_ERROR_TYPES
+        )
+        or backend_results.get("error_type") == "technical_error"
+    )
+
+    if skip_ai_response:
+        reply_text = ""
+    else:
+        print("[STEP 3] Invocazione AI Redattrice con i dati reali del backend...")
+        reply_text = run_step3_response(message_text=combined_text, backend_results=backend_results, history_text=history_str)
 
     if action_requested == "SEARCH_SLOTS" and backend_results["slot_found"]:
         reply_text = f"{reply_text}\n{slots_text_to_append}"
-    elif action_requested == "CONFIRM_BOOKING" and backend_results["error_type"] == "slot_not_found_in_memory":
-        reply_text = "Scusami, non sono riuscito a trovare lo slot richiesto. Potresti indicarmi il numero esatto tra quelli proposti sopra?"
-    elif action_requested == "CONFIRM_BOOKING" and backend_results["error_type"] == "no_context_available":
-        reply_text = tpl.CONVERSATION_EXPIRED
-    elif action_requested == "CONFIRM_BOOKING" and backend_results["error_type"] == "slot_time_mismatch":
-        # Verifica di coerenza slot/orario: messaggio interamente
-        # deterministico, mai improvvisato dall'AI, che cita la verità
-        # esatta dello slot risolto per numero.
-        label = backend_results.get("mismatch_slot_label")
-        reply_text = (
-            f"Attenzione: lo slot indicato corrisponde in realtà a {label}, non all'orario che hai scritto. "
-            f"Confermi {label}? Rispondi 'sì' per confermare, oppure scegli un altro slot tra quelli proposti."
-        )
-    elif action_requested == "MODIFY_BOOKING" and backend_results["error_type"] == "no_appointment_to_modify":
-        reply_text = "Non risulta nessun appuntamento in programma da modificare."
-    elif action_requested == "MODIFY_BOOKING" and backend_results["error_type"] == "appointment_confirmation_needed":
-        # Identificazione dell'appuntamento da spostare: sempre un
-        # messaggio deterministico, mai l'AI a citare data/ora reali.
-        label = backend_results.get("appointment_confirmation_label")
-        reply_text = f"Il tuo prossimo appuntamento in programma è {label}. È questo che vuoi spostare?"
-    elif action_requested == "MODIFY_BOOKING" and backend_results["error_type"] == "no_more_appointments_to_propose":
-        reply_text = "Non ho altri appuntamenti da proporti. Se vuoi, indicami tu direttamente la data di quello da spostare."
-    elif action_requested == "MODIFY_BOOKING" and backend_results["error_type"] == "ask_new_time_preference":
-        reply_text = "Per quando vorresti spostarlo?"
     elif action_requested == "MODIFY_BOOKING" and backend_results["slot_found"]:
         reply_text = f"{reply_text}\n{slots_text_to_append}"
+    elif backend_results.get("booking_success"):
+        old_label = backend_results.get("cancelled_old_appointment_label")
+        new_label = backend_results.get("confirmed_slot_label")
+        reply_text = (
+            tpl.booking_moved(old_label, new_label)
+            if old_label
+            else tpl.booking_confirmed_new(new_label)
+        )
+    elif backend_results.get("error_type") == "slot_time_mismatch":
+        reply_text = tpl.slot_time_mismatch(backend_results.get("mismatch_slot_label"))
+    elif backend_results.get("error_type") == "missing_data":
+        reply_text = tpl.booking_missing_name(backend_results.get("failed_slot_label"))
+    elif backend_results.get("error_type") == "slot_occupied":
+        reply_text = tpl.booking_slot_occupied(backend_results.get("failed_slot_label"))
+    elif backend_results.get("error_type") == "slot_not_found_in_memory":
+        reply_text = tpl.SLOT_NOT_FOUND_IN_MEMORY
+    elif backend_results.get("error_type") == "no_context_available":
+        reply_text = tpl.CONVERSATION_EXPIRED
+    elif backend_results.get("error_type") == "no_appointment_to_modify":
+        reply_text = tpl.NO_APPOINTMENT_TO_MODIFY
+    elif backend_results.get("error_type") == "appointment_confirmation_needed":
+        reply_text = tpl.appointment_confirmation_needed(backend_results.get("appointment_confirmation_label"))
+    elif backend_results.get("error_type") == "no_more_appointments_to_propose":
+        reply_text = tpl.NO_MORE_APPOINTMENTS_TO_PROPOSE
+    elif backend_results.get("error_type") == "ask_new_time_preference":
+        reply_text = tpl.ASK_NEW_TIME_PREFERENCE
+    elif backend_results.get("error_type") == "technical_error":
+        reply_text = tpl.TECHNICAL_ERROR
 
     # Il saluto iniziale ("Buongiorno"/"Buon pomeriggio"/"Buonasera") è
     # calcolato qui dal backend in base all'ora locale reale del tenant,
