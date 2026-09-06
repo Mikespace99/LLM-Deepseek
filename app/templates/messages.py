@@ -40,7 +40,7 @@ UNCLEAR = (
 VERIFYING_AVAILABILITY = "Perfetto, verifico subito la disponibilità e ti faccio sapere."
 
 NO_SLOTS_FOUND = (
-    "Al momento non ho disponibilità nei prossimi giorni.\n"
+    "Al momento non ho trovato disponibilità.\n"
     "Posso avvisarti se si libera qualcosa, oppure vuoi lasciare i tuoi dati?"
 )
 
@@ -69,6 +69,25 @@ SLOT_INVALID = (
 )
 
 BOOKING_CANCELLED = "Appuntamento cancellato. Se hai bisogno di riprenotare, sono qui."
+
+TECHNICAL_ERROR = (
+    "Si è verificato un problema tecnico imprevisto. "
+    "Riprova tra poco, oppure scegli un altro slot tra quelli proposti."
+)
+
+SLOT_NOT_FOUND_IN_MEMORY = (
+    "Scusami, non sono riuscito a trovare lo slot richiesto. "
+    "Potresti indicarmi il numero esatto tra quelli proposti sopra?"
+)
+
+NO_APPOINTMENT_TO_MODIFY = "Non risulta nessun appuntamento in programma da modificare."
+
+NO_MORE_APPOINTMENTS_TO_PROPOSE = (
+    "Non ho altri appuntamenti da proporti. "
+    "Se vuoi, indicami tu direttamente la data di quello da spostare."
+)
+
+ASK_NEW_TIME_PREFERENCE = "Per quando vorresti spostarlo?"
 
 ASK_SERVICE = "Certo! Per quale servizio vorresti prenotare?"
 ASK_DATE = "Che giorno ti andrebbe bene?"
@@ -138,6 +157,47 @@ def confirmation_summary(service: str, date: str, time: str, person_name: str) -
         f"• Intestato a: {person_name}\n\n"
         "Confermi?"
     )
+
+
+def booking_confirmed_new(slot_label: str) -> str:
+    """Prenotazione nuova andata a buon fine (non uno spostamento)."""
+    return (
+        f"Appuntamento confermato per {slot_label}!\n\n"
+        "Ti aspettiamo, a presto!"
+    )
+
+
+def booking_moved(old_slot_label: str, new_slot_label: str) -> str:
+    """Spostamento riuscito: il nuovo è già scritto, il vecchio è stato cancellato."""
+    return (
+        f"Fatto! Il tuo appuntamento è stato spostato da {old_slot_label} a {new_slot_label}.\n\n"
+        "A presto!"
+    )
+
+
+def booking_missing_name(slot_label: str) -> str:
+    return (
+        f"Per confermare l'appuntamento di {slot_label} mi manca il nome dell'intestatario. "
+        "Potresti fornirmelo?"
+    )
+
+
+def booking_slot_occupied(slot_label: str) -> str:
+    return (
+        f"Mi dispiace, nel frattempo {slot_label} è stato occupato. "
+        "Puoi scegliere un altro slot tra quelli proposti?"
+    )
+
+
+def slot_time_mismatch(real_slot_label: str) -> str:
+    return (
+        f"Attenzione: lo slot indicato corrisponde in realtà a {real_slot_label}, non all'orario che hai scritto. "
+        f"Confermi {real_slot_label}? Rispondi 'sì' per confermare, oppure scegli un altro slot tra quelli proposti."
+    )
+
+
+def appointment_confirmation_needed(appointment_label: str) -> str:
+    return f"Il tuo prossimo appuntamento in programma è {appointment_label}. È questo che vuoi spostare?"
 
 
 # ------------------------------------------------------------
