@@ -29,6 +29,7 @@ from app.constants import (
 from app.context.builder import build_context
 from app.integrations.whatsapp import send_whatsapp_message
 from app.message_buffer import message_buffer
+from app.repositories import appointment as appointment_repo
 from app.repositories.conversation import (
     append_message,
     get_or_create_conversation,
@@ -123,6 +124,32 @@ def _normalize_time_str(value) -> str | None:
     return f"{hour:02d}:{minute:02d}"
 
 
+_ITALIAN_WEEKDAYS = {
+    0: "Lunedì",
+    1: "Martedì",
+    2: "Mercoledì",
+    3: "Giovedì",
+    4: "Venerdì",
+    5: "Sabato",
+    6: "Domenica",
+}
+
+_ITALIAN_MONTHS = {
+    1: "gennaio",
+    2: "febbraio",
+    3: "marzo",
+    4: "aprile",
+    5: "maggio",
+    6: "giugno",
+    7: "luglio",
+    8: "agosto",
+    9: "settembre",
+    10: "ottobre",
+    11: "novembre",
+    12: "dicembre",
+}
+
+
 def _slot_labels(slots: list) -> list[str]:
     """
     Prende una lista di slot e restituisce
@@ -130,31 +157,6 @@ def _slot_labels(slots: list) -> list[str]:
     """
 
     labels = []
-
-    iso_weekdays = {
-        0: "Lunedì",
-        1: "Martedì",
-        2: "Mercoledì",
-        3: "Giovedì",
-        4: "Venerdì",
-        5: "Sabato",
-        6: "Domenica",
-    }
-
-    iso_months = {
-        1: "gennaio",
-        2: "febbraio",
-        3: "marzo",
-        4: "aprile",
-        5: "maggio",
-        6: "giugno",
-        7: "luglio",
-        8: "agosto",
-        9: "settembre",
-        10: "ottobre",
-        11: "novembre",
-        12: "dicembre",
-    }
 
     for slot in slots:
         if (
@@ -169,10 +171,10 @@ def _slot_labels(slots: list) -> list[str]:
                 )
 
                 giorno_settimana = (
-                    iso_weekdays[dt.weekday()]
+                    _ITALIAN_WEEKDAYS[dt.weekday()]
                 )
 
-                mese_str = iso_months[dt.month]
+                mese_str = _ITALIAN_MONTHS[dt.month]
                 time_str = slot["time"][:5]
 
                 labels.append(
@@ -193,6 +195,123 @@ def _slot_labels(slots: list) -> list[str]:
             labels.append(str(slot))
 
     return labels
+
+
+def _appointment_label(appt: dict) -> str:
+    """
+    Etichetta leggibile (stesso stile di _slot_labels) per un
+    appuntamento esistente letto dal DB. Usata nei messaggi
+    deterministici del flusso di modifica appuntamento, per citare
+    sempre la verità reale, mai un orario ricostruito dall'AI.
+    """
+    date_str = str(appt.get("appointment_date") or "")[:10]
+    time_str = str(appt.get("appointment_time") or "")[:5]
+
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        return f"{_ITALIAN_WEEKDAYS[dt.weekday()]} {dt.day} {_ITALIAN_MONTHS[dt.month]} alle {time_str}"
+    except Exception:
+        return f"{date_str} alle {time_str}"
+
+
+def _resolve_search_slots(
+    tenant: dict,
+    knowledge: dict,
+    parameters: dict,
+    new_collected: dict,
+    previous_last_slots: list,
+    backend_results: dict,
+) -> tuple[dict, str]:
+    """
+    Esegue una ricerca slot e prepara il testo da appendere alla
+    risposta. Isolata qui per essere riusata IDENTICA sia da una
+    prenotazione nuova (SEARCH_SLOTS) sia dal flusso di modifica
+    appuntamento una volta identificato quale spostare: la ricerca del
+    nuovo orario è uguale nei due casi, cambia solo cosa succede dopo
+    la conferma (INSERT semplice, oppure INSERT + cancellazione del
+    vecchio). "backend_results" viene aggiornato in place.
+    """
+    historical_backup = new_collected.get("historical_slots") or []
+    modifying_backup = new_collected.get("modifying_appointment")
+    current_service = parameters.get("service") or new_collected.get("service")
+
+    # Pialliamo i residui feriali a livello radice
+    new_collected = {
+        "service": current_service,
+        "historical_slots": historical_backup,
+        "last_slots": [],
+        "modifying_appointment": modifying_backup,
+        "preferences": {
+            "period": parameters.get("period"),
+            "weekday": parameters.get("weekday"),
+            "week_part": parameters.get("week_part"),
+            "date_from": parameters.get("date_from"),
+            "date_to": parameters.get("date_to"),
+            "time_preference": parameters.get("time_preference"),
+            "exact_time": parameters.get("exact_time"),
+            "date": None, "ignore_preferences": None
+        }
+    }
+
+    prefs = new_collected["preferences"]
+    has_day_signal = any(
+        prefs.get(k) for k in ("period", "weekday", "week_part", "date_from")
+    )
+
+    # Nel flusso di modifica, se il cliente indica SOLO un orario senza
+    # un giorno diverso, presumiamo che voglia restare sullo stesso
+    # giorno dell'appuntamento originale, invece di far scattare la
+    # ricerca ampia di default.
+    if modifying_backup and not has_day_signal and prefs.get("time_preference"):
+        prefs["date"] = modifying_backup.get("appointment_date")
+
+    slots_text_to_append = ""
+
+    try:
+        booking_res = search_availability(tenant=tenant, knowledge=knowledge, collected_data=new_collected)
+        slots = booking_res.get("candidate_slots") or []
+        result = booking_res.get("result") or {}
+
+        backend_results["is_studio_closed"] = result.get("is_studio_closed", False)
+        backend_results["is_studio_full"] = result.get("is_studio_full", False)
+
+        if slots:
+            backend_results["slot_found"] = True
+            backend_results["slots_list"] = slots
+            new_collected["last_slots"] = slots
+
+            labels = _slot_labels(slots)
+            slots_text_to_append = "\n" + "\n".join(f"{i+1}. {label}" for i, label in enumerate(labels)) + "\n\nQuale preferisci? (puoi rispondere con il numero o con l'orario)"
+        else:
+            # Nessuno slot nuovo: prima di arrenderci, riverifichiamo
+            # (lato backend, MAI lato AI) se le opzioni mostrate nel
+            # turno precedente sono ancora libere e le riproponiamo
+            # in modo deterministico, come nel percorso di successo.
+            fallback_candidates = previous_last_slots or (new_collected.get("historical_slots") or [])
+            still_valid = revalidate_slots(
+                tenant=tenant,
+                knowledge=knowledge,
+                collected_data=new_collected,
+                slots=fallback_candidates,
+            )
+
+            if still_valid:
+                backend_results["slot_found"] = True
+                backend_results["slots_list"] = still_valid
+                backend_results["repeated_previous_slots"] = True
+                new_collected["last_slots"] = still_valid
+
+                labels = _slot_labels(still_valid)
+                slots_text_to_append = "\n" + "\n".join(f"{i+1}. {label}" for i, label in enumerate(labels)) + "\n\nQuale preferisci? (puoi rispondere con il numero o con l'orario)"
+            else:
+                backend_results["error_type"] = "no_slots_found"
+                if result.get("search_was_narrow"):
+                    backend_results["error_type"] = "no_slots_narrow"
+    except Exception as e:
+        print(f"[BACKEND ERROR] Errore in search_availability: {e}")
+        backend_results["error_type"] = "technical_error"
+
+    return new_collected, slots_text_to_append
 
 
 @app.get("/api/status")
@@ -455,69 +574,9 @@ async def process_messages(messages: list[dict]):
 
     # Sotto-flusso A: Ricerca Disponibilità
     if action_requested == "SEARCH_SLOTS":
-        historical_backup = new_collected.get("historical_slots") or []
-        current_service = parameters.get("service") or new_collected.get("service")
-        
-        # Pialliamo i residui feriali a livello radice
-        new_collected = {
-            "service": current_service,
-            "historical_slots": historical_backup,
-            "last_slots": [],
-            "preferences": {
-                "period": parameters.get("period"),
-                "weekday": parameters.get("weekday"),
-                "week_part": parameters.get("week_part"),
-                "date_from": parameters.get("date_from"),
-                "date_to": parameters.get("date_to"),
-                "time_preference": parameters.get("time_preference"),
-                "exact_time": parameters.get("exact_time"),
-                "date": None, "ignore_preferences": None
-            }
-        }
-
-        try:
-            booking_res = search_availability(tenant=tenant, knowledge=knowledge, collected_data=new_collected)
-            slots = booking_res.get("candidate_slots") or []
-            result = booking_res.get("result") or {}
-            
-            backend_results["is_studio_closed"] = result.get("is_studio_closed", False)
-            backend_results["is_studio_full"] = result.get("is_studio_full", False)
-
-            if slots:
-                backend_results["slot_found"] = True
-                backend_results["slots_list"] = slots
-                new_collected["last_slots"] = slots
-                
-                labels = _slot_labels(slots)
-                slots_text_to_append = "\n" + "\n".join(f"{i+1}. {label}" for i, label in enumerate(labels)) + "\n\nQuale preferisci? (puoi rispondere con il numero o con l'orario)"
-            else:
-                # Nessuno slot nuovo: prima di arrenderci, riverifichiamo
-                # (lato backend, MAI lato AI) se le opzioni mostrate nel
-                # turno precedente sono ancora libere e le riproponiamo
-                # in modo deterministico, come nel percorso di successo.
-                fallback_candidates = previous_last_slots or (new_collected.get("historical_slots") or [])
-                still_valid = revalidate_slots(
-                    tenant=tenant,
-                    knowledge=knowledge,
-                    collected_data=new_collected,
-                    slots=fallback_candidates,
-                )
-
-                if still_valid:
-                    backend_results["slot_found"] = True
-                    backend_results["slots_list"] = still_valid
-                    backend_results["repeated_previous_slots"] = True
-                    new_collected["last_slots"] = still_valid
-
-                    labels = _slot_labels(still_valid)
-                    slots_text_to_append = "\n" + "\n".join(f"{i+1}. {label}" for i, label in enumerate(labels)) + "\n\nQuale preferisci? (puoi rispondere con il numero o con l'orario)"
-                else:
-                    backend_results["error_type"] = "no_slots_found"
-                    if result.get("search_was_narrow"):
-                        backend_results["error_type"] = "no_slots_narrow"
-        except Exception as e:
-            print(f"[BACKEND ERROR] Errore in search_availability: {e}")
-            backend_results["error_type"] = "technical_error"
+        new_collected, slots_text_to_append = _resolve_search_slots(
+            tenant, knowledge, parameters, new_collected, previous_last_slots, backend_results
+        )
 
     # Sotto-flusso B: Prenotazione Deterministica e Transazione (Step 4)
     elif action_requested == "CONFIRM_BOOKING":
@@ -628,6 +687,22 @@ async def process_messages(messages: list[dict]):
                     if result.get("success"):
                         backend_results["booking_success"] = True
                         backend_results["confirmed_slot_label"] = _slot_labels([resolved_slot])[0]
+
+                        # Se stiamo spostando un appuntamento esistente,
+                        # il nuovo è già scritto con successo: SOLO ORA
+                        # cancelliamo il vecchio (soft-delete, status
+                        # "cancelled", storico mantenuto). Se qualcosa va
+                        # storto prima di questo punto, il vecchio
+                        # appuntamento non viene mai toccato.
+                        modifying = new_collected.get("modifying_appointment")
+                        if modifying:
+                            try:
+                                appointment_repo.cancel_appointment(tenant["id"], modifying["id"])
+                                backend_results["cancelled_old_appointment_label"] = _appointment_label(modifying)
+                            except Exception as e:
+                                print(f"[BACKEND ERROR] Nuovo appuntamento confermato, ma cancellazione del vecchio ({modifying.get('id')}) fallita: {e}")
+                                backend_results["old_appointment_cancel_failed"] = True
+
                         new_collected = {}
                     else:
                         # Distinguiamo SEMPRE il motivo reale: un vero
@@ -661,6 +736,82 @@ async def process_messages(messages: list[dict]):
                 backend_results["error_type"] = "slot_not_found_in_memory"
                 new_collected["pending_slot_number"] = None
                 new_collected["pending_exact_time"] = None
+
+    # Sotto-flusso B2: Modifica di un appuntamento esistente.
+    # Riusa integralmente la ricerca/scelta/conferma già costruita per
+    # una prenotazione nuova (Sotto-flusso A e B): la "modifica" vive
+    # solo nel campo "modifying_appointment" di collected_data, letto
+    # solo nell'ultimissimo istante (dopo che il NUOVO appuntamento è
+    # già stato scritto con successo, si cancella il vecchio - mai il
+    # contrario, così il cliente non perde mai quello che aveva).
+    elif action_requested == "MODIFY_BOOKING":
+        modifying = new_collected.get("modifying_appointment")
+
+        if modifying:
+            # Appuntamento da spostare già identificato e confermato in
+            # un turno precedente: da qui è identico a una prenotazione
+            # nuova.
+            new_collected, slots_text_to_append = _resolve_search_slots(
+                tenant, knowledge, parameters, new_collected, previous_last_slots, backend_results
+            )
+        else:
+            pending_appt = new_collected.get("pending_confirmation_appointment")
+            confirmation = parameters.get("confirmation")
+
+            if pending_appt and confirmation == "no":
+                # Non è quello: passiamo al secondo candidato, se c'è.
+                rejected = new_collected.get("rejected_appointment_ids") or []
+                rejected.append(pending_appt.get("id"))
+                new_collected["rejected_appointment_ids"] = rejected
+                new_collected["pending_confirmation_appointment"] = None
+
+                candidates = appointment_repo.list_upcoming_for_customer(
+                    tenant_id=tenant["id"], customer_id=customer["id"], limit=2
+                )
+                next_candidate = next((a for a in candidates if a.get("id") not in rejected), None)
+
+                if next_candidate:
+                    new_collected["pending_confirmation_appointment"] = next_candidate
+                    backend_results["error_type"] = "appointment_confirmation_needed"
+                    backend_results["appointment_confirmation_label"] = _appointment_label(next_candidate)
+                else:
+                    backend_results["error_type"] = "no_more_appointments_to_propose"
+
+            elif pending_appt:
+                # Confermato: da qui in poi cerchiamo il nuovo orario
+                # esattamente come per una prenotazione nuova.
+                new_collected["modifying_appointment"] = pending_appt
+                new_collected["pending_confirmation_appointment"] = None
+                new_collected["rejected_appointment_ids"] = None
+
+                has_new_preference = any(
+                    parameters.get(k)
+                    for k in ("period", "weekday", "week_part", "date_from", "time_preference", "exact_time")
+                )
+
+                if has_new_preference:
+                    new_collected, slots_text_to_append = _resolve_search_slots(
+                        tenant, knowledge, parameters, new_collected, previous_last_slots, backend_results
+                    )
+                else:
+                    backend_results["error_type"] = "ask_new_time_preference"
+
+            else:
+                # Primo turno del flusso: individuiamo l'appuntamento più
+                # vicino nel tempo e chiediamo conferma, uno alla volta
+                # (mai una lista da disambiguare: al massimo 2 candidati).
+                candidates = appointment_repo.list_upcoming_for_customer(
+                    tenant_id=tenant["id"], customer_id=customer["id"], limit=2
+                )
+
+                if not candidates:
+                    backend_results["error_type"] = "no_appointment_to_modify"
+                else:
+                    first = candidates[0]
+                    new_collected["pending_confirmation_appointment"] = first
+                    new_collected["rejected_appointment_ids"] = []
+                    backend_results["error_type"] = "appointment_confirmation_needed"
+                    backend_results["appointment_confirmation_label"] = _appointment_label(first)
 
     # Sotto-flusso C: Chiacchiere, Saluti o Annullamento
     else:
@@ -710,6 +861,19 @@ async def process_messages(messages: list[dict]):
             f"Attenzione: lo slot indicato corrisponde in realtà a {label}, non all'orario che hai scritto. "
             f"Confermi {label}? Rispondi 'sì' per confermare, oppure scegli un altro slot tra quelli proposti."
         )
+    elif action_requested == "MODIFY_BOOKING" and backend_results["error_type"] == "no_appointment_to_modify":
+        reply_text = "Non risulta nessun appuntamento in programma da modificare."
+    elif action_requested == "MODIFY_BOOKING" and backend_results["error_type"] == "appointment_confirmation_needed":
+        # Identificazione dell'appuntamento da spostare: sempre un
+        # messaggio deterministico, mai l'AI a citare data/ora reali.
+        label = backend_results.get("appointment_confirmation_label")
+        reply_text = f"Il tuo prossimo appuntamento in programma è {label}. È questo che vuoi spostare?"
+    elif action_requested == "MODIFY_BOOKING" and backend_results["error_type"] == "no_more_appointments_to_propose":
+        reply_text = "Non ho altri appuntamenti da proporti. Se vuoi, indicami tu direttamente la data di quello da spostare."
+    elif action_requested == "MODIFY_BOOKING" and backend_results["error_type"] == "ask_new_time_preference":
+        reply_text = "Per quando vorresti spostarlo?"
+    elif action_requested == "MODIFY_BOOKING" and backend_results["slot_found"]:
+        reply_text = f"{reply_text}\n{slots_text_to_append}"
 
     # Il saluto iniziale ("Buongiorno"/"Buon pomeriggio"/"Buonasera") è
     # calcolato qui dal backend in base all'ora locale reale del tenant,
@@ -723,11 +887,23 @@ async def process_messages(messages: list[dict]):
     # STEP 5: CONSOLIDAMENTO E STRUTTURAZIONE INVIO FINALE
     # ------------------------------------------------------------
     print("[STEP 5] Salvataggio finale del DB e invio su WhatsApp Cloud API...")
-    # Il workflow riflette ora lo stato reale: "booking" con una proposta
-    # di slot in attesa di scelta, "idle" in ogni altro caso. Prima veniva
-    # sempre forzato a "idle", rendendo lo stato inutilizzabile come
-    # segnale (es. per il rilevamento del saluto qui sopra).
-    if action_requested == "SEARCH_SLOTS" and backend_results["slot_found"]:
+    # Il workflow riflette lo stato reale: "booking" quando c'è una
+    # negoziazione viva di qualunque tipo (proposta di slot in attesa di
+    # scelta, dato mancante, chiarimento di coerenza, identificazione o
+    # ricerca nel flusso di modifica), "idle" in ogni altro caso. Prima
+    # veniva forzato a "idle" ogni volta che l'azione non era SEARCH_SLOTS,
+    # il che avrebbe esposto anche CONFIRM_BOOKING/MODIFY_BOOKING a metà
+    # negoziazione al reset-su-saluto.
+    has_live_negotiation = bool(
+        new_collected.get("last_slots")
+        or new_collected.get("pending_confirmation_slot")
+        or new_collected.get("pending_slot_number")
+        or new_collected.get("pending_exact_time")
+        or new_collected.get("modifying_appointment")
+        or new_collected.get("pending_confirmation_appointment")
+    )
+
+    if has_live_negotiation:
         workflow_to_save, step_to_save = WORKFLOW_BOOKING, STEP_SHOWING_SLOTS
     else:
         workflow_to_save, step_to_save = WORKFLOW_IDLE, STEP_NONE
