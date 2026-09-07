@@ -272,6 +272,39 @@ def _describe_search_criteria(parameters: dict) -> str | None:
 
 
 
+
+def _looks_like_person_name(text: str) -> bool:
+    """
+    Euristica deterministica: il messaggio sembra un nome/cognome
+    e non una scelta di slot, un sì/no o una nuova richiesta.
+    """
+    t = (text or "").strip()
+    if not t or len(t) > 60:
+        return False
+    low = t.lower()
+    # Escludi conferme, numeri di slot, richieste operative
+    if low in {"si", "sì", "no", "ok", "va bene", "confermo", "certo", "esatto"}:
+        return False
+    if any(p in low for p in (
+        "prenot", "appuntament", "spost", "cancel", "annull",
+        "disponib", "quando", "quanto", "parcheggio", "orari",
+        "grazie", "buongiorno", "buonasera", "salve",
+    )):
+        return False
+    # Solo cifre o "il 3" → non è un nome
+    if t.isdigit():
+        return False
+    import re
+    if re.fullmatch(r"il\s*\d+", low):
+        return False
+    # 1–5 parole, principalmente lettere
+    words = t.split()
+    if not (1 <= len(words) <= 5):
+        return False
+    letter_words = sum(1 for w in words if any(c.isalpha() for c in w))
+    return letter_words >= max(1, len(words) - 1)
+
+
 def _preferences_are_open(parameters: dict) -> bool:
     """
     True se il cliente non ha indicato un giorno/periodo specifico:
@@ -733,6 +766,22 @@ async def process_messages(messages: list[dict]):
     collected = conversation.get("collected_data") or {}
     new_collected = dict(collected)
 
+    # Se stiamo aspettando il nome intestatario (slot già scelto e
+    # confermato, manca solo person_name) e il messaggio sembra un nome,
+    # forzalo in modo deterministico: Step 1 spesso classifica "Mario Rossi"
+    # come JUST_TALK e non valorizza person_name.
+    if (
+        new_collected.get("pending_confirmation_slot")
+        and not new_collected.get("person_name")
+        and not parameters.get("person_name")
+        and _looks_like_person_name(combined_text)
+    ):
+        parameters = dict(parameters)
+        parameters["person_name"] = combined_text.strip()
+        parameters["confirmation"] = parameters.get("confirmation") or "yes"
+        action_requested = "CONFIRM_BOOKING"
+        print(f"[NAME] riconosciuto nome intestatario: {parameters['person_name']}")
+
     # Catturato SUBITO, prima che qualunque ramo sotto resetti "collected_data":
     # sono gli slot mostrati realmente al cliente nel turno precedente.
     previous_last_slots = collected.get("last_slots") or []
@@ -895,7 +944,17 @@ async def process_messages(messages: list[dict]):
             resolved_slot = None
             mismatch_slot = None
 
-            if (
+            # Nome intestatario in arrivo con slot già in pending:
+            # risolvi subito dallo slot in sospeso (non ricalcolare
+            # da slot_number residuo in memoria).
+            if pending and (
+                parameters.get("person_name") or new_collected.get("person_name")
+            ):
+                resolved_slot = pending
+                new_collected["pending_slot_number"] = None
+                new_collected["pending_exact_time"] = None
+
+            elif (
                 parameters.get("slot_number") is None
                 and not parameters.get("exact_time")
                 and pending
@@ -982,9 +1041,13 @@ async def process_messages(messages: list[dict]):
                 if parameters.get("person_name"):
                     new_collected["person_name"] = parameters.get("person_name")
 
+                # Non richiedere di nuovo la conferma breve se è già
+                # arrivato il nome intestatario (passo successivo).
                 _need_short_confirm = (
                     parameters.get("confirmation") != "yes"
                     and parameters.get("slot_number") is not None
+                    and not parameters.get("person_name")
+                    and not new_collected.get("person_name")
                 )
                 if _need_short_confirm:
                     new_collected["pending_confirmation_slot"] = resolved_slot
