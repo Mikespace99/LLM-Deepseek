@@ -847,6 +847,10 @@ async def process_messages(messages: list[dict]):
     _has_pending_menu = bool(
         _collected_early.get("last_slots")
         or _collected_early.get("proposed_days")
+        or _collected_early.get("pending_confirmation_appointment")
+        or _collected_early.get("modifying_appointment")
+        or _collected_early.get("awaiting_person_name")
+        or _collected_early.get("pending_confirmation_slot")
     )
     # Ack solo se non c'è menu in sospeso e non è un ringraziamento/saluto breve
     # post-prenotazione (es. "ok grazie"): in quel caso non serve verificare nulla.
@@ -874,7 +878,13 @@ async def process_messages(messages: list[dict]):
     )
     _sent_greeting_ack = False
     _greeting_only = _is_greeting_only(combined_text)
-    if not _has_pending_menu and not _looks_like_thanks and not _greeting_only:
+    _pure_confirm = _is_pure_yes(combined_text) or _is_pure_no(combined_text)
+    if (
+        not _has_pending_menu
+        and not _looks_like_thanks
+        and not _greeting_only
+        and not _pure_confirm
+    ):
         wa_info_early = tenant.get("info") or {}
         try:
             _greet = _time_of_day_greeting(tenant.get("timezone"))
@@ -1590,23 +1600,34 @@ async def process_messages(messages: list[dict]):
                     backend_results["error_type"] = "no_more_appointments_to_propose"
 
             elif pending_appt:
-                # Confermato: da qui in poi cerchiamo il nuovo orario
-                # esattamente come per una prenotazione nuova.
+                # Confermato quale appuntamento spostare.
                 new_collected["modifying_appointment"] = pending_appt
                 new_collected["pending_confirmation_appointment"] = None
                 new_collected["rejected_appointment_ids"] = None
 
-                has_new_preference = any(
-                    parameters.get(k)
-                    for k in ("period", "weekday", "week_part", "date_from", "time_preference", "exact_time")
-                )
+                # Preferenze temporali: SOLO se il messaggio corrente le esprime
+                # davvero (non se Step 1 le inventa dalla cronologia, es. dal
+                # giorno del vecchio appuntamento).
+                _msg_low = (combined_text or "").lower()
+                _msg_has_time_pref = any(
+                    p in _msg_low
+                    for p in (
+                        "luned", "marted", "mercoled", "gioved", "venerd", "sabat", "domenic",
+                        "domani", "settimana", "mattina", "pomeriggio", "sera",
+                        "prossim", "tra ", "il giorno", "alle ",
+                        "gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno",
+                        "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre",
+                    )
+                ) and not _is_pure_yes(combined_text)
 
-                if has_new_preference:
+                if _msg_has_time_pref:
                     new_collected, slots_text_to_append = _resolve_search_slots(
                         tenant, knowledge, parameters, new_collected, previous_last_slots, backend_results
                     )
                 else:
+                    # "sì" / "si esatto" → chiedi preferenza, NON cercare slot
                     backend_results["error_type"] = "ask_new_time_preference"
+                    print("[MODIFY] conferma appuntamento → chiedo preferenza nuovo orario")
 
             else:
                 # Primo turno del flusso: individuiamo l'appuntamento più
