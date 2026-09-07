@@ -87,6 +87,8 @@ REGOLE DI SELEZIONE RIGIDE:
 6. MODIFICA DI UN APPUNTAMENTO ESISTENTE: se il cliente esprime la volontà di spostare, cambiare o riprogrammare un appuntamento GIÀ FISSATO (es. "vorrei spostare il mio appuntamento", "quel giorno non posso, si può cambiare?", "devo spostare l'appuntamento di mercoledì"), imposta action_requested="MODIFY_BOOKING". Non devi individuare tu QUALE appuntamento intende: ci pensa il backend, che conosce già gli appuntamenti del cliente. Se nello stesso messaggio il cliente indica anche una nuova preferenza di giorno/orario (es. "spostalo a giovedì pomeriggio"), valorizza comunque i normali campi period/weekday/week_part/time_preference/exact_time come faresti per una ricerca normale.
 7. RISPOSTE A UNA DOMANDA DI CONFERMA SÌ/NO: se l'ultimo messaggio dell'assistente (visibile nella cronologia) ha posto una domanda con risposta sì/no (es. "È questo l'appuntamento che vuoi spostare?", "Confermi le 15:30?"), classifica la risposta del cliente in "confirmation": "yes" se accetta/conferma (anche solo "sì", "esatto", "va bene", o se prosegue dando altre informazioni senza contraddire), "no" se rifiuta/nega esplicitamente (es. "no", "non quello", "è un altro"). Se il messaggio corrente non è una risposta a una domanda di conferma, lascia "confirmation" a null.
 8. DOMANDE INFORMATIVE / CHIACCHIERE: domande su prezzi, orari dello studio, indirizzo, parcheggio, servizi, o semplici saluti/ringraziamenti → action_requested="JUST_TALK". Non inventare parametri di ricerca.
+9. RICHIESTE APERTE SENZA GIORNO: frasi come "quando sarebbe possibile?", "quando posso venire?", "avete disponibilità?", "vorrei prenotare" SENZA un giorno/periodo specifico → action_requested="SEARCH_SLOTS" e lascia period/weekday/date_from/date_to tutti a null (ricerca aperta). NON impostare period="today".
+10. RINGRAZIAMENTI DI CHIUSURA: "ok grazie", "grazie", "a presto", "perfetto grazie" dopo una conferma → action_requested="JUST_TALK", senza parametri di ricerca.
 
 Rispondi escludendo qualsiasi testo di contorno, restituisci solo il JSON pulito.
 """.strip()
@@ -155,7 +157,11 @@ Nota: tutti gli esiti di una conferma o modifica appuntamento (successo, orario 
 1. SE IL BACKEND HA TROVATO APPUNTAMENTI (slot_found = True) E 'repeated_previous_slots' NON è True:
    a) Se nel messaggio del cliente c'è ANCHE una domanda informativa (prezzo, costo, tariffe, orari dello studio, indirizzo, dove siete, parcheggio, servizi, ecc.), rispondi PRIMA a quella domanda in 1 frase, usando SOLO i dati in services_text / locations_text / working_hours_text. Se l'informazione non è presente in quei dati, dillo onestamente ("Non ho questo dato, ti consiglio di chiedere allo studio"). NON inventare. Poi fai l'introduzione alle disponibilità.
    b) Se NON c'è alcuna domanda informativa, NON menzionare prezzi/orari/indirizzo: vai dritto all'introduzione.
-   Per l'introduzione: se 'search_criteria_label' è presente (criterio ORIGINALE fornito dal backend), usalo (es. 'Certamente, ecco le disponibilità per la prossima settimana:', 'Ecco le disponibilità per mercoledì prossimo di pomeriggio:'). NON dedurre un giorno specifico guardando le date in 'slots_list'. Se 'search_criteria_label' è assente, usa un'introduzione generica (es. 'Ecco le prime disponibilità:').
+   Per l'introduzione:
+   - Se backend_real_data.open_search è True, usa ESATTAMENTE: "I primi appuntamenti disponibili sono i seguenti:"
+   - Altrimenti se 'search_criteria_label' è presente, usalo (es. 'Certamente, ecco le disponibilità per la prossima settimana:').
+   - Altrimenti introduzione generica (es. 'Ecco le prime disponibilità:').
+   NON dedurre un giorno specifico guardando le date in 'slots_list'.
    Ricorda: tu NON elenchi mai gli slot/giorni — li appende il sistema sotto il tuo testo.
 
 2. SE IL BACKEND HA TROVATO APPUNTAMENTI (slot_found = True) E 'repeated_previous_slots' È True:
