@@ -74,6 +74,32 @@ def _looks_like_greeting(text: str) -> bool:
     return bool(_GREETING_PATTERN.match((text or "").strip()))
 
 
+def _is_greeting_only(text: str) -> bool:
+    """True se il messaggio e' solo un saluto, senza richiesta operativa."""
+    import re
+    t = (text or "").strip()
+    if not t or len(t) > 80:
+        return False
+    low = t.lower()
+    if any(p in low for p in (
+        "prenot", "appuntament", "spost", "cancel", "annull",
+        "disponib", "quando", "vorrei", "possibile",
+        "orario", "costo", "prezzo", "parcheggio",
+    )):
+        return False
+    cleaned = _GREETING_PATTERN.sub("", t, count=3)
+    cleaned = re.sub(
+        r"(buon\s*giorno|buon\s*d[ìi]|buona\s*sera|buon\s*pomeriggio|salve|ciao)",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"[^\wàèéìòù]+", " ", cleaned, flags=re.IGNORECASE).strip()
+    if cleaned.lower() in {"", "grazie", "a presto", "buona giornata"}:
+        return True
+    return len(cleaned.split()) <= 1 and not any(ch.isdigit() for ch in cleaned)
+
+
 def _time_of_day_greeting(tz_name: str | None) -> str:
     """
     Sceglie il saluto corretto in base all'ora locale reale del tenant.
@@ -829,7 +855,8 @@ async def process_messages(messages: list[dict]):
         )
     )
     _sent_greeting_ack = False
-    if not _has_pending_menu and not _looks_like_thanks:
+    _greeting_only = _is_greeting_only(combined_text)
+    if not _has_pending_menu and not _looks_like_thanks and not _greeting_only:
         wa_info_early = tenant.get("info") or {}
         try:
             _greet = _time_of_day_greeting(tenant.get("timezone"))
@@ -886,6 +913,36 @@ async def process_messages(messages: list[dict]):
     # ------------------------------------------------------------
     # STEP 1: AI ANALISTA (Comprensione dell'intenzione pura)
     # ------------------------------------------------------------
+    # --- Solo saluto: risposta di cortesia, niente AI / ricerca ---
+    if _greeting_only and not _has_pending_menu:
+        greet = _time_of_day_greeting(tenant.get("timezone"))
+        reply_text = (
+            f"{greet}! Sono a disposizione per aiutarti a fissare un appuntamento, "
+            f"spostarne uno già prenotato o darti informazioni. Come posso aiutarti?"
+        )
+        wa_info = tenant.get("info") or {}
+        try:
+            await send_whatsapp_message(
+                phone,
+                reply_text,
+                wa_info.get("access_token") or Config.WHATSAPP_TOKEN,
+                wa_info.get("phone_number_id") or Config.WHATSAPP_PHONE_NUMBER_ID,
+            )
+        except Exception as e:
+            print(f"[GREETING] invio fallito: {e}")
+        try:
+            recent = conversation.get("recent_messages") or []
+            recent = append_message(
+                conversation["id"],
+                role="assistant",
+                content=reply_text,
+                current_messages=recent,
+            )
+        except Exception as e:
+            print(f"[GREETING] append history fallito: {e}")
+        print("[GREETING-ONLY] risposta di cortesia inviata, skip pipeline")
+        return
+
     print("[STEP 1] Esecuzione AI Analista...")
     step1_result = run_step1_analysis(message_text=combined_text, full_context_dict=context)
     action_requested = step1_result.get("action_requested", "JUST_TALK")
