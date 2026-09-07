@@ -89,6 +89,7 @@ REGOLE DI SELEZIONE RIGIDE:
 8. DOMANDE INFORMATIVE / CHIACCHIERE: domande su prezzi, orari dello studio, indirizzo, parcheggio, servizi, o semplici saluti/ringraziamenti → action_requested="JUST_TALK". Non inventare parametri di ricerca.
 9. RICHIESTE APERTE SENZA GIORNO: frasi come "quando sarebbe possibile?", "quando posso venire?", "avete disponibilità?", "vorrei prenotare" SENZA un giorno/periodo specifico → action_requested="SEARCH_SLOTS" e lascia period/weekday/date_from/date_to tutti a null (ricerca aperta). NON impostare period="today".
 10. RINGRAZIAMENTI DI CHIUSURA: "ok grazie", "grazie", "a presto", "perfetto grazie" dopo una conferma → action_requested="JUST_TALK", senza parametri di ricerca.
+11. NOME INTESTATARIO: se l'assistente ha appena chiesto il nome (o "a nome di chi") e il cliente risponde con un nome e/o cognome (es. "Mario Rossi", "Alberico Miss"), imposta action_requested="CONFIRM_BOOKING", parameters.person_name=quel testo, parameters.confirmation="yes". Non classificare un nome come JUST_TALK.
 
 Rispondi escludendo qualsiasi testo di contorno, restituisci solo il JSON pulito.
 """.strip()
