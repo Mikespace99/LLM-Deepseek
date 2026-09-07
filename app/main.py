@@ -74,6 +74,24 @@ def _looks_like_greeting(text: str) -> bool:
     return bool(_GREETING_PATTERN.match((text or "").strip()))
 
 
+
+def _is_pure_yes(text: str) -> bool:
+    t = (text or "").strip().lower()
+    return t in {
+        "si", "sì", "ok", "va bene", "confermo", "certo", "esatto",
+        "si grazie", "sì grazie", "ok grazie", "va bene grazie",
+        "affermativo", "corretto", "esatto quello", "si quello", "sì quello",
+    }
+
+
+def _is_pure_no(text: str) -> bool:
+    t = (text or "").strip().lower()
+    return t in {
+        "no", "no grazie", "no no", "non è quello", "non quello",
+        "sbagliato", "no quello", "un altro", "l'altro",
+    }
+
+
 def _is_greeting_only(text: str) -> bool:
     """True se il messaggio e' solo un saluto, senza richiesta operativa."""
     import re
@@ -1122,6 +1140,44 @@ async def process_messages(messages: list[dict]):
             f"exact_time={parameters.get('exact_time')} "
             f"text={combined_text!r}"
         )
+
+
+    # --- Gate deterministico: conferma appuntamento da spostare ---
+    # Se abbiamo chiesto "È questo che vuoi spostare?" e il cliente risponde
+    # sì/no, non dipendiamo da Step 1.
+    _pending_appt = new_collected.get("pending_confirmation_appointment")
+    if _pending_appt and not new_collected.get("modifying_appointment"):
+        if _is_pure_yes(combined_text):
+            parameters = dict(parameters)
+            parameters["confirmation"] = "yes"
+            action_requested = "MODIFY_BOOKING"
+            print("[MODIFY-GATE] conferma SI sull'appuntamento da spostare")
+        elif _is_pure_no(combined_text):
+            parameters = dict(parameters)
+            parameters["confirmation"] = "no"
+            action_requested = "MODIFY_BOOKING"
+            print("[MODIFY-GATE] conferma NO sull'appuntamento da spostare")
+
+    # Se stiamo già spostando (modifying_appointment) e il cliente indica
+    # un nuovo periodo senza che Step 1 resti su MODIFY, forza MODIFY
+    # così non si perde il legame col vecchio appuntamento.
+    if (
+        new_collected.get("modifying_appointment")
+        and action_requested in ("SEARCH_SLOTS", "JUST_TALK")
+        and not new_collected.get("awaiting_person_name")
+        and not (new_collected.get("last_slots") and _message_looks_like_slot_choice(
+            combined_text, len(new_collected.get("last_slots") or [])
+        ))
+    ):
+        # Solo se sembra una preferenza temporale / ricerca, non una chiacchiera pura
+        _low = (combined_text or "").lower()
+        if any(p in _low for p in (
+            "luned", "marted", "mercoled", "gioved", "venerd", "sabat", "domenic",
+            "domani", "settimana", "mattina", "pomeriggio", "sera",
+            "prossim", "quando", "spost", "prefer", "giorno", "alle",
+        )) or action_requested == "SEARCH_SLOTS":
+            action_requested = "MODIFY_BOOKING"
+            print("[MODIFY-GATE] mantieni MODIFY_BOOKING durante spostamento in corso")
 
     # Catturato SUBITO, prima che qualunque ramo sotto resetti "collected_data":
     # sono gli slot mostrati realmente al cliente nel turno precedente.
