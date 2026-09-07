@@ -3,6 +3,8 @@ Debounce + Lock per messaggi WhatsApp.
 
 - Raggruppa messaggi ravvicinati dello stesso numero (debounce)
 - Evita elaborazioni parallele sullo stesso numero (lock)
+- Se arrivano messaggi DURANTE un'elaborazione, restano in coda e
+  vengono processati subito dopo (non dopo un altro debounce lungo)
 
 NB: usa asyncio.create_task/asyncio.sleep, non threading.Timer.
 Il debounce precedente girava su un thread separato: su alcuni hosting
@@ -24,6 +26,11 @@ from app.config import Config
 DEBOUNCE_SECONDS = float(
     getattr(Config, "MESSAGE_DEBOUNCE_SECONDS", 10)
 )
+
+# Dopo che un'elaborazione finisce, se nel frattempo sono arrivati
+# altri messaggi, li processiamo quasi subito (non aspettiamo di nuovo
+# tutto il debounce: l'utente ha già ricevuto la risposta principale).
+POST_PROCESSING_FLUSH_SECONDS = 0.4
 
 # Massimo messaggi tenuti in coda per un numero
 MAX_BUFFERED_MESSAGES = 6
@@ -65,14 +72,31 @@ class MessageBuffer:
             if old_task and not old_task.done():
                 old_task.cancel()
 
+            # Se c'è già un'elaborazione in corso per questo numero,
+            # non avviamo un flush aggressivo: i messaggi restano in
+            # coda e verranno presi dal blocco finally di _flush.
+            if phone in self._processing:
+                print(
+                    f"[buffer] {phone}: elaborazione in corso, "
+                    f"{len(self._buffers[phone])} msg in coda laterale"
+                )
+                return
+
             self._tasks[phone] = asyncio.create_task(
                 self._schedule_flush(phone, process_fn, DEBOUNCE_SECONDS)
             )
 
-            print(f"[buffer] {phone}: {len(self._buffers[phone])} msg in coda "
-                  f"(attendo {DEBOUNCE_SECONDS}s)")
+            print(
+                f"[buffer] {phone}: {len(self._buffers[phone])} msg in coda "
+                f"(attendo {DEBOUNCE_SECONDS}s)"
+            )
 
-    async def _schedule_flush(self, phone: str, process_fn: Callable, delay: float) -> None:
+    async def _schedule_flush(
+        self,
+        phone: str,
+        process_fn: Callable,
+        delay: float,
+    ) -> None:
         try:
             await asyncio.sleep(delay)
         except asyncio.CancelledError:
@@ -92,11 +116,15 @@ class MessageBuffer:
                 return
 
             if phone in self._processing:
-                print(f"[buffer] {phone}: già in processing, re-accodo {len(messages)} msg")
-                self._buffers[phone] = messages
-                self._tasks[phone] = asyncio.create_task(
-                    self._schedule_flush(phone, process_fn, RETRY_SECONDS)
+                print(
+                    f"[buffer] {phone}: già in processing, "
+                    f"re-accodo {len(messages)} msg"
                 )
+                self._buffers[phone] = (
+                    self._buffers.get(phone, []) + messages
+                )
+                # Non schedulare qui: il finally del processing attivo
+                # farà il flush rapido a fine elaborazione.
                 return
 
             self._processing.add(phone)
@@ -110,10 +138,21 @@ class MessageBuffer:
             async with self._lock:
                 self._processing.discard(phone)
 
-                # Se nel frattempo sono arrivati altri messaggi, avvia un nuovo ciclo
+                # Se nel frattempo sono arrivati altri messaggi (domande
+                # laterali durante l'elaborazione), processali quasi subito
+                # senza rifare tutto il debounce lungo.
                 if self._buffers.get(phone):
+                    print(
+                        f"[buffer] {phone}: "
+                        f"{len(self._buffers[phone])} msg laterali in coda → "
+                        f"flush tra {POST_PROCESSING_FLUSH_SECONDS}s"
+                    )
                     self._tasks[phone] = asyncio.create_task(
-                        self._schedule_flush(phone, process_fn, DEBOUNCE_SECONDS)
+                        self._schedule_flush(
+                            phone,
+                            process_fn,
+                            POST_PROCESSING_FLUSH_SECONDS,
+                        )
                     )
 
 
