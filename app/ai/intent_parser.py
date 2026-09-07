@@ -206,3 +206,57 @@ Restituisci solo il testo fluido della risposta da inviare, senza codice JSON e 
     except Exception as e:
         print(f"[AI STEP 3 ERROR] {e}")
         return "Certamente, ecco le disponibilità trovate:"
+
+
+# ============================================================
+# CLASSIFICAZIONE DUBBIO NOME (solo quando awaiting_person_name)
+# ============================================================
+
+def classify_name_doubt(message_text: str) -> dict:
+    """
+    Chiamata leggera solo nel dubbio: il messaggio non è chiaramente
+    un nome né chiaramente una domanda. Ritorna:
+      {"kind": "name"|"info_question"|"cancel"|"other", "person_name": str|null}
+    Nel dubbio non inventare un nome: kind=other.
+    """
+    system_prompt = """
+Sei un classificatore strettissimo. Il backend sta aspettando il NOME
+dell'intestatario di un appuntamento. Il cliente ha scritto un messaggio ambiguo.
+
+Rispondi SOLO con JSON:
+{
+  "kind": "name" | "info_question" | "cancel" | "other",
+  "person_name": null o stringa (solo se kind=name)
+}
+
+Regole:
+- kind=name solo se il messaggio È (o contiene chiaramente) un nome e cognome da usare come intestatario.
+- kind=info_question se chiede prezzi, orari, indirizzo, parcheggio, pagamenti, ecc.
+- kind=cancel se vuole annullare / lasciare stare.
+- kind=other in ogni altro caso (non inventare un nome).
+- Se kind=name, person_name deve essere solo nome e cognome, senza altre frasi.
+""".strip()
+
+    try:
+        response = client.chat.completions.create(
+            model=Config.AI_MODEL_INTENT,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": message_text or ""},
+            ],
+            temperature=0.0,
+            response_format={"type": "json_object"},
+        )
+        data = json.loads(response.choices[0].message.content)
+        kind = data.get("kind") or "other"
+        if kind not in ("name", "info_question", "cancel", "other"):
+            kind = "other"
+        person_name = data.get("person_name") if kind == "name" else None
+        if person_name:
+            person_name = str(person_name).strip() or None
+        if kind == "name" and not person_name:
+            kind = "other"
+        return {"kind": kind, "person_name": person_name}
+    except Exception as e:
+        print(f"[classify_name_doubt ERROR] {e}")
+        return {"kind": "other", "person_name": None}
