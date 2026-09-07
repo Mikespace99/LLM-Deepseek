@@ -643,15 +643,42 @@ async def process_messages(messages: list[dict]):
         _collected_early.get("last_slots")
         or _collected_early.get("proposed_days")
     )
-    if not _has_pending_menu:
+    # Ack solo se non c'è menu in sospeso e non è un ringraziamento/saluto breve
+    # post-prenotazione (es. "ok grazie"): in quel caso non serve verificare nulla.
+    _text_low = (combined_text or "").strip().lower()
+    _looks_like_thanks = bool(
+        _text_low
+        and len(_text_low) < 40
+        and any(
+            p in _text_low
+            for p in (
+                "grazie",
+                "ok grazie",
+                "va bene grazie",
+                "perfetto grazie",
+                "a presto",
+                "arrivederci",
+                "buona giornata",
+                "buonasera",
+            )
+        )
+        and not any(
+            p in _text_low
+            for p in ("prenot", "appuntament", "spost", "cancel", "annull")
+        )
+    )
+    _sent_greeting_ack = False
+    if not _has_pending_menu and not _looks_like_thanks:
         wa_info_early = tenant.get("info") or {}
         try:
+            _greet = _time_of_day_greeting(tenant.get("timezone"))
             await send_whatsapp_message(
                 phone,
-                "Un attimo, verifico…",
+                f"{_greet}! Un attimo, verifico…",
                 wa_info_early.get("access_token") or Config.WHATSAPP_TOKEN,
                 wa_info_early.get("phone_number_id") or Config.WHATSAPP_PHONE_NUMBER_ID,
             )
+            _sent_greeting_ack = True
         except Exception as ack_err:
             print(f"[ACK] invio fallito (proseguo comunque): {ack_err}")
 
@@ -792,27 +819,33 @@ async def process_messages(messages: list[dict]):
     # ------------------------------------------------------------
     elif action_requested == "SEARCH_SLOTS":
         if _preferences_are_open(parameters):
-            # Menu giorni guidato
-            try:
-                days_res = search_available_days(
-                    tenant=tenant,
-                    knowledge=knowledge,
-                    collected_data=new_collected,
-                    max_days=3,
-                )
-                days = days_res.get("available_days") or []
-                if days:
-                    new_collected["proposed_days"] = days
-                    new_collected["last_slots"] = []  # non ancora orari
-                    backend_results["slot_found"] = True
-                    backend_results["days_menu"] = True
-                    backend_results["search_criteria_label"] = "i prossimi giorni"
-                    slots_text_to_append = _build_days_text(days)
-                else:
-                    backend_results["error_type"] = "no_slots_found"
-            except Exception as e:
-                print(f"[BACKEND ERROR] search_available_days: {e}")
-                backend_results["error_type"] = "technical_error"
+            # Nessuna preferenza di giorno: ricerca ampia (orizzonte tenant,
+            # tipicamente 30 giorni) e prime disponibilità cronologiche.
+            parameters = dict(parameters or {})
+            # Forza ricerca senza vincoli temporali stretti
+            parameters["period"] = None
+            parameters["weekday"] = None
+            parameters["week_part"] = None
+            parameters["date_from"] = None
+            parameters["date_to"] = None
+            # ignore_preferences lato collected
+            prefs = dict(new_collected.get("preferences") or {})
+            prefs["ignore_preferences"] = True
+            new_collected["preferences"] = prefs
+            new_collected, slots_text_to_append = _resolve_search_slots(
+                tenant, knowledge, parameters, new_collected, previous_last_slots, backend_results
+            )
+            if backend_results.get("slot_found"):
+                backend_results["search_criteria_label"] = None  # intro fissa sotto
+                backend_results["open_search"] = True
+                # Sostituisci l'intro del testo slot con la frase richiesta
+                labels = _slot_labels(new_collected.get("last_slots") or [])
+                if labels:
+                    slots_text_to_append = (
+                        "\n"
+                        + "\n".join(f"{i+1}. {label}" for i, label in enumerate(labels))
+                        + "\n\nQuale preferisci? (puoi rispondere con il numero o con l'orario)"
+                    )
         else:
             # Comportamento classico: ricerca slot con criteri specifici
             new_collected, slots_text_to_append = _resolve_search_slots(
@@ -889,7 +922,19 @@ async def process_messages(messages: list[dict]):
                     # non coincide, non prenotiamo alla cieca: chiediamo
                     # conferma citando l'orario reale (verità di backend,
                     # mai improvvisata dall'AI).
-                    if wanted and candidate.get("time") != wanted:
+                    # Se exact_time è solo il numero dello slot trasformato
+                    # in orario fantasma (es. slot 3 → "03:00"), ignoralo:
+                    # il cliente ha scelto il numero, non un orario.
+                    phantom_from_index = False
+                    if wanted and slot_number is not None:
+                        try:
+                            wh, wm = wanted.split(":")
+                            if int(wh) == int(slot_number) and int(wm) == 0:
+                                phantom_from_index = True
+                        except (TypeError, ValueError):
+                            pass
+
+                    if wanted and candidate.get("time") != wanted and not phantom_from_index:
                         mismatch_slot = candidate
                     else:
                         resolved_slot = candidate
@@ -937,69 +982,81 @@ async def process_messages(messages: list[dict]):
                 if parameters.get("person_name"):
                     new_collected["person_name"] = parameters.get("person_name")
 
-                try:
-                    booking_res = create_booking(
-                        tenant=tenant, 
-                        knowledge=knowledge, 
-                        collected_data=new_collected, 
-                        customer=customer, 
-                        phone_number=phone
-                    )
-                    result = booking_res.get("result") or {}
+                _need_short_confirm = (
+                    parameters.get("confirmation") != "yes"
+                    and parameters.get("slot_number") is not None
+                )
+                if _need_short_confirm:
+                    new_collected["pending_confirmation_slot"] = resolved_slot
+                    backend_results["error_type"] = "slot_choice_confirm"
+                    backend_results["confirm_slot_number"] = parameters.get("slot_number")
+                    backend_results["confirm_slot_time"] = (resolved_slot.get("time") or "")[:5]
+                    backend_results["confirm_slot_label"] = _slot_labels([resolved_slot])[0]
 
-                    if result.get("success"):
-                        backend_results["booking_success"] = True
-                        backend_results["confirmed_slot_label"] = _slot_labels([resolved_slot])[0]
+                if not _need_short_confirm:
+                    try:
+                        booking_res = create_booking(
+                            tenant=tenant,
+                            knowledge=knowledge,
+                            collected_data=new_collected,
+                            customer=customer,
+                            phone_number=phone
+                        )
+                        result = booking_res.get("result") or {}
 
-                        # Se stiamo spostando un appuntamento esistente,
-                        # il nuovo è già scritto con successo: SOLO ORA
-                        # cancelliamo il vecchio (soft-delete, status
-                        # "cancelled", storico mantenuto). Se qualcosa va
-                        # storto prima di questo punto, il vecchio
-                        # appuntamento non viene mai toccato.
-                        modifying = new_collected.get("modifying_appointment")
-                        if modifying:
-                            try:
-                                appointment_repo.cancel_appointment(tenant["id"], modifying["id"])
-                                backend_results["cancelled_old_appointment_label"] = _appointment_label(modifying)
-                            except Exception as e:
-                                print(f"[BACKEND ERROR] Nuovo appuntamento confermato, ma cancellazione del vecchio ({modifying.get('id')}) fallita: {e}")
-                                backend_results["old_appointment_cancel_failed"] = True
+                        if result.get("success"):
+                            backend_results["booking_success"] = True
+                            backend_results["confirmed_slot_label"] = _slot_labels([resolved_slot])[0]
 
-                        new_collected = {}
-                    else:
-                        # Distinguiamo SEMPRE il motivo reale: un vero
-                        # conflitto ("slot_conflict") non è la stessa cosa
-                        # di un dato mancante o di un errore tecnico
-                        # diverso — raccontare sempre "è già occupato" a
-                        # prescindere nasconderebbe il problema vero.
-                        error = result.get("error")
-                        backend_results["failed_slot_label"] = _slot_labels([resolved_slot])[0]
+                            # Se stiamo spostando un appuntamento esistente,
+                            # il nuovo è già scritto con successo: SOLO ORA
+                            # cancelliamo il vecchio (soft-delete, status
+                            # "cancelled", storico mantenuto). Se qualcosa va
+                            # storto prima di questo punto, il vecchio
+                            # appuntamento non viene mai toccato.
+                            modifying = new_collected.get("modifying_appointment")
+                            if modifying:
+                                try:
+                                    appointment_repo.cancel_appointment(tenant["id"], modifying["id"])
+                                    backend_results["cancelled_old_appointment_label"] = _appointment_label(modifying)
+                                except Exception as e:
+                                    print(f"[BACKEND ERROR] Nuovo appuntamento confermato, ma cancellazione del vecchio ({modifying.get('id')}) fallita: {e}")
+                                    backend_results["old_appointment_cancel_failed"] = True
 
-                        if error == "slot_conflict":
-                            backend_results["error_type"] = "slot_occupied"
-                            # Quello slot specifico non è più valido:
-                            # non ha senso ritentarlo automaticamente,
-                            # il cliente deve sceglierne un altro.
-                            new_collected["pending_slot_number"] = None
-                            new_collected["pending_exact_time"] = None
-                        elif error == "missing_data":
-                            backend_results["error_type"] = "missing_data"
-                            # Lo slot resta valido: manca solo il nome.
-                            # Ripopoliamo SEMPRE pending_confirmation_slot
-                            # con lo slot appena risolto (indipendentemente
-                            # da come ci siamo arrivati: per numero,
-                            # orario, o conferma di un chiarimento), così
-                            # il prossimo turno - che darà solo il nome -
-                            # lo ritrova in automatico, senza dover essere
-                            # ricostruito dall'AI leggendo la cronologia.
-                            new_collected["pending_confirmation_slot"] = resolved_slot
+                            new_collected = {}
                         else:
-                            backend_results["error_type"] = "technical_error"
-                            print(f"[BACKEND ERROR] create_booking fallita per un motivo non atteso: {error}")
-                except Exception as e:
-                    print(f"[BACKEND ERROR] Errore in create_booking: {e}")
-                    backend_results["error_type"] = "technical_error"
+                            # Distinguiamo SEMPRE il motivo reale: un vero
+                            # conflitto ("slot_conflict") non è la stessa cosa
+                            # di un dato mancante o di un errore tecnico
+                            # diverso — raccontare sempre "è già occupato" a
+                            # prescindere nasconderebbe il problema vero.
+                            error = result.get("error")
+                            backend_results["failed_slot_label"] = _slot_labels([resolved_slot])[0]
+
+                            if error == "slot_conflict":
+                                backend_results["error_type"] = "slot_occupied"
+                                # Quello slot specifico non è più valido:
+                                # non ha senso ritentarlo automaticamente,
+                                # il cliente deve sceglierne un altro.
+                                new_collected["pending_slot_number"] = None
+                                new_collected["pending_exact_time"] = None
+                            elif error == "missing_data":
+                                backend_results["error_type"] = "missing_data"
+                                # Lo slot resta valido: manca solo il nome.
+                                # Ripopoliamo SEMPRE pending_confirmation_slot
+                                # con lo slot appena risolto (indipendentemente
+                                # da come ci siamo arrivati: per numero,
+                                # orario, o conferma di un chiarimento), così
+                                # il prossimo turno - che darà solo il nome -
+                                # lo ritrova in automatico, senza dover essere
+                                # ricostruito dall'AI leggendo la cronologia.
+                                new_collected["pending_confirmation_slot"] = resolved_slot
+                            else:
+                                backend_results["error_type"] = "technical_error"
+                                print(f"[BACKEND ERROR] create_booking fallita per un motivo non atteso: {error}")
+                    except Exception as e:
+                        print(f"[BACKEND ERROR] Errore in create_booking: {e}")
+                        backend_results["error_type"] = "technical_error"
             else:
                 backend_results["error_type"] = "slot_not_found_in_memory"
                 new_collected["pending_slot_number"] = None
@@ -1135,6 +1192,7 @@ async def process_messages(messages: list[dict]):
             and backend_results.get("error_type") in _DETERMINISTIC_MODIFY_ERROR_TYPES
         )
         or backend_results.get("error_type") == "technical_error"
+        or backend_results.get("error_type") == "slot_choice_confirm"
     )
 
     if skip_ai_response:
@@ -1164,9 +1222,16 @@ async def process_messages(messages: list[dict]):
     # Se c'erano slot proposti, li ri-elenca in modo deterministico così
     # il cliente non deve ripescare la cronologia.
     elif action_requested == "JUST_TALK":
+        # Ringraziamento / saluto di chiusura senza negoziazione attiva
+        if _looks_like_thanks and not (
+            new_collected.get("last_slots") or new_collected.get("proposed_days")
+        ):
+            reply_text = "Prego, a presto!"
+            pending_slots = []
+            pending_days = []
         pending_slots = new_collected.get("last_slots") or []
         pending_days = new_collected.get("proposed_days") or []
-        if pending_slots and reply_text:
+        if pending_slots and reply_text and not _looks_like_thanks:
             labels = _slot_labels(pending_slots)
             resume_block = (
                 "\n\nTornando alla prenotazione in corso, queste erano le disponibilità:\n"
@@ -1190,6 +1255,10 @@ async def process_messages(messages: list[dict]):
             if old_label
             else tpl.booking_confirmed_new(new_label)
         )
+    elif backend_results.get("error_type") == "slot_choice_confirm":
+        n = backend_results.get("confirm_slot_number")
+        t = backend_results.get("confirm_slot_time") or ""
+        reply_text = f"Confermi quindi di aver scelto lo slot n.{n} alle ore {t}?"
     elif backend_results.get("error_type") == "slot_time_mismatch":
         reply_text = tpl.slot_time_mismatch(backend_results.get("mismatch_slot_label"))
     elif backend_results.get("error_type") == "missing_data":
@@ -1225,7 +1294,9 @@ async def process_messages(messages: list[dict]):
     # calcolato qui dal backend in base all'ora locale reale del tenant,
     # non lasciato all'AI, e antepposto SOLO al primo messaggio di una
     # conversazione nuova (o resettata da un saluto del cliente).
-    if is_conversation_start and reply_text:
+    # Saluto solo al primo messaggio utile, e SOLO se non l'abbiamo già
+    # messo nell'ack ("Buongiorno! Un attimo, verifico…").
+    if is_conversation_start and reply_text and not _sent_greeting_ack:
         greeting = _time_of_day_greeting(tenant.get("timezone"))
         reply_text = f"{greeting}! {reply_text}"
 
