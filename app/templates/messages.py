@@ -105,6 +105,11 @@ INFO_GENERIC = "Certo, cosa vorresti sapere? (orari, prezzi, indirizzo, parchegg
 LATERAL_CONTINUE = "Vuoi continuare con la prenotazione che stavamo facendo?"
 LATERAL_CONTINUE_SHORT = "Quando vuoi, dimmi pure come procedere con la prenotazione."
 
+NO_MORE_DAYS = (
+    "Non ho altre disponibilità nei prossimi giorni.\n"
+    "Vuoi che ti metta in contatto con un operatore?"
+)
+
 
 # ------------------------------------------------------------
 # Template dinamici
@@ -119,6 +124,42 @@ def showing_slots(slots: list[str], intro: str | None = None) -> str:
     """
     lines = "\n".join(f"{i+1}. {s}" for i, s in enumerate(slots))
     intro = intro or "Ho trovato queste disponibilità:"
+    return (
+        f"{intro}\n\n{lines}\n\n"
+        "Quale preferisci? (puoi rispondere con il numero o con l'orario)"
+    )
+
+
+def showing_days(days: list[dict], intro: str | None = None) -> str:
+    """
+    days: lista di dict da search_available_days
+      [{"date": "...", "label": "Martedì 9 settembre", "morning": True, "afternoon": True}, ...]
+    """
+    intro = intro or "Ho disponibilità nei prossimi giorni:"
+    lines = []
+    for i, d in enumerate(days, 1):
+        parts = []
+        if d.get("morning"):
+            parts.append("mattina")
+        if d.get("afternoon"):
+            parts.append("pomeriggio")
+        fascia = " e ".join(parts) if parts else "orari disponibili"
+        lines.append(f"{i}. {d.get('label', d.get('date'))} ({fascia})")
+    body = "\n".join(lines)
+    return (
+        f"{intro}\n\n{body}\n\n"
+        "Scrivi il numero oppure il giorno che preferisci."
+    )
+
+
+def showing_times(slots: list[str], day_label: str, intro: str | None = None) -> str:
+    """
+    slots: lista di stringhe orario già formattate (es. ["09:00", "10:30", ...])
+           oppure label complete; viene usato così com'è.
+    day_label: es. "martedì 9 settembre"
+    """
+    intro = intro or f"Per {day_label} ho:"
+    lines = "\n".join(f"{i+1}. {s}" for i, s in enumerate(slots))
     return (
         f"{intro}\n\n{lines}\n\n"
         "Quale preferisci? (puoi rispondere con il numero o con l'orario)"
