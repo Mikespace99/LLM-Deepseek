@@ -1012,3 +1012,146 @@ def create_booking(
                 "error": str(exc),
             },
         }
+
+
+# ============================================================
+# RICERCA GUIDATA A GIORNI (menu scelte progressive)
+# ============================================================
+
+def search_available_days(
+    tenant: dict,
+    knowledge: dict,
+    collected_data: dict,
+    max_days: int = 3,
+) -> dict:
+    """
+    Restituisce i primi `max_days` giorni con almeno uno slot libero
+    nei prossimi slot_search_days del tenant, con indicazione
+    mattina (< 13:00) / pomeriggio (>= 13:00).
+
+    Ritorno:
+    {
+      "available_days": [
+        {
+          "date": "YYYY-MM-DD",
+          "label": "Martedì 9 settembre",
+          "morning": True,
+          "afternoon": False,
+        },
+        ...
+      ],
+      "result": {"success": True, "no_days": False}
+    }
+    """
+    # Ricerca ampia: ignoriamo preferenze temporali strette
+    wide = dict(collected_data or {})
+    prefs = dict(wide.get("preferences") or {})
+    prefs["ignore_preferences"] = True
+    # Pulisce eventuali vincoli di giorno/periodo
+    for k in ("date", "date_from", "date_to", "period", "weekday", "week_part"):
+        prefs.pop(k, None)
+    wide["preferences"] = prefs
+
+    ctx = _build_context(tenant, knowledge, wide)
+    ctx = _compute_search_window(ctx)
+
+    busy_events = appointment_repo.list_busy_for_availability(
+        tenant_id=ctx["tenant_id"],
+        date_from=ctx["from_date"].isoformat(),
+        date_to=ctx["to_date"].isoformat(),
+    )
+
+    # Genera tutti gli slot nella finestra (il filtro preferred_window
+    # è già None perché ignore_preferences=True).
+    # _generate_and_filter_slots taglia a MAX_CANDIDATE_SLOTS: per i giorni
+    # ci serve di più, quindi scansioniamo giorno per giorno.
+    by_date: dict[str, list] = {}
+    day = ctx["from_date"]
+    last_day = ctx["to_date"]
+
+    while day <= last_day and len(by_date) < max_days:
+        date_str = day.isoformat()
+
+        day_prefs = {
+            "date": date_str,
+            "date_from": date_str,
+            "date_to": date_str,
+        }
+        day_collected = dict(wide)
+        day_collected["preferences"] = day_prefs
+
+        day_ctx = _build_context(tenant, knowledge, day_collected)
+        day_ctx = _compute_search_window(day_ctx)
+        raw = _generate_and_filter_slots(day_ctx, busy_events)
+        slots = raw.get("candidate_slots") or []
+
+        if slots:
+            by_date[date_str] = slots
+
+        day += timedelta(days=1)
+
+    available_days = []
+    for date_str in sorted(by_date.keys()):
+        slots = by_date[date_str]
+
+        morning = False
+        afternoon = False
+        for s in slots:
+            try:
+                hour = int(str(s.get("time") or "99:99")[:2])
+            except ValueError:
+                continue
+            if hour < 13:
+                morning = True
+            else:
+                afternoon = True
+
+        try:
+            dt = datetime.strptime(date_str[:10], "%Y-%m-%d")
+            weekday = ITALIAN_WEEKDAYS[dt.isoweekday() % 7]
+            month = ITALIAN_MONTHS[dt.month - 1]
+            label = f"{weekday.capitalize()} {dt.day} {month}"
+        except Exception:
+            label = date_str
+
+        available_days.append({
+            "date": date_str[:10],
+            "label": label,
+            "morning": morning,
+            "afternoon": afternoon,
+        })
+
+    return {
+        "available_days": available_days,
+        "result": {
+            "success": True,
+            "no_days": len(available_days) == 0,
+        },
+    }
+
+
+def search_times_for_day(
+    tenant: dict,
+    knowledge: dict,
+    collected_data: dict,
+    target_date: str,
+) -> dict:
+    """
+    Restituisce gli slot orari reali di un singolo giorno.
+    Riusa interamente search_availability con la data fissata.
+    """
+    data = dict(collected_data or {})
+    prefs = dict(data.get("preferences") or {})
+    prefs["date"] = target_date[:10]
+    prefs["date_from"] = target_date[:10]
+    prefs["date_to"] = target_date[:10]
+    # Rimuove filtri di periodo ampi che potrebbero confliggere
+    for k in ("period", "weekday", "week_part", "ignore_preferences"):
+        prefs.pop(k, None)
+    data["preferences"] = prefs
+
+    return search_availability(
+        tenant=tenant,
+        knowledge=knowledge,
+        collected_data=data,
+    )
