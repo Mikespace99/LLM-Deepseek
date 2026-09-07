@@ -924,7 +924,24 @@ async def process_messages(messages: list[dict]):
         f"person_name_param={parameters.get('person_name')!r} "
         f"action={action_requested} text={combined_text!r}"
     )
+    # Se Step 1 ha già estratto il nome mentre siamo in attesa: usalo e
+    # pulisci residui di scelta slot, senza rifare classificazione.
     if (
+        _awaiting_name
+        and parameters.get("person_name")
+        and not new_collected.get("person_name")
+    ):
+        parameters = dict(parameters)
+        parameters["confirmation"] = "yes"
+        parameters["slot_number"] = None
+        parameters["exact_time"] = None
+        new_collected["person_name"] = str(parameters["person_name"]).strip()
+        new_collected["pending_slot_number"] = None
+        new_collected["pending_exact_time"] = None
+        new_collected["awaiting_person_name"] = False
+        action_requested = "CONFIRM_BOOKING"
+        print(f"[NAME] da Step1, accettato: {new_collected['person_name']!r}")
+    elif (
         _awaiting_name
         and not parameters.get("person_name")
         and not new_collected.get("person_name")
@@ -1217,17 +1234,26 @@ async def process_messages(messages: list[dict]):
             resolved_slot = None
             mismatch_slot = None
 
+            # Propaga SEMPRE il nome nei collected appena disponibile
+            if parameters.get("person_name"):
+                new_collected["person_name"] = str(parameters.get("person_name")).strip()
+                print(f"[CONFIRM] person_name impostato: {new_collected['person_name']!r}")
+
             # Nome intestatario in arrivo: usa slot in pending o selected.
-            if (
-                parameters.get("person_name") or new_collected.get("person_name")
-            ):
+            if new_collected.get("person_name"):
                 resolved_slot = (
                     pending
                     or new_collected.get("selected_slot")
                 )
+                if resolved_slot:
+                    new_collected["selected_slot"] = resolved_slot
                 new_collected["pending_slot_number"] = None
                 new_collected["pending_exact_time"] = None
                 new_collected["awaiting_person_name"] = False
+                print(
+                    f"[CONFIRM] resolved da pending/selected: "
+                    f"{bool(resolved_slot)} keys={list(resolved_slot.keys()) if resolved_slot else None}"
+                )
 
             elif (
                 parameters.get("slot_number") is None
@@ -1381,11 +1407,24 @@ async def process_messages(messages: list[dict]):
                                 new_collected["pending_slot_number"] = None
                                 new_collected["pending_exact_time"] = None
                             elif error == "missing_data":
-                                backend_results["error_type"] = "missing_data"
-                                # Lo slot resta valido: manca solo il nome.
-                                new_collected["pending_confirmation_slot"] = resolved_slot
-                                new_collected["selected_slot"] = resolved_slot
-                                new_collected["awaiting_person_name"] = True
+                                missing_fields = result.get("missing_fields") or []
+                                print(f"[CONFIRM] create_booking missing_fields={missing_fields}")
+                                # Se manca solo il nome → chiedi nome
+                                # Se manca lo slot → errore tecnico / riproponi
+                                # Se manca il service ma c'è il nome, riprova dopo aver
+                                # eventualmente settato un default (già in engine)
+                                if "person_name" in missing_fields or not missing_fields:
+                                    backend_results["error_type"] = "missing_data"
+                                    new_collected["pending_confirmation_slot"] = resolved_slot
+                                    new_collected["selected_slot"] = resolved_slot
+                                    new_collected["awaiting_person_name"] = True
+                                elif "slot.datetime" in missing_fields:
+                                    backend_results["error_type"] = "slot_not_found_in_memory"
+                                else:
+                                    backend_results["error_type"] = "missing_data"
+                                    new_collected["pending_confirmation_slot"] = resolved_slot
+                                    new_collected["selected_slot"] = resolved_slot
+                                    new_collected["awaiting_person_name"] = True
                             else:
                                 backend_results["error_type"] = "technical_error"
                                 print(f"[BACKEND ERROR] create_booking fallita per un motivo non atteso: {error}")
