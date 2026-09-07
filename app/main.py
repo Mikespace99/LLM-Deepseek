@@ -273,6 +273,109 @@ def _describe_search_criteria(parameters: dict) -> str | None:
 
 
 
+
+def _normalize_spoken_time(text: str) -> str | None:
+    """
+    Estrae un orario HH:MM da testo libero.
+    Accetta: 11:30, 11.30, 11 e 30, alle 11:30, 1130, alle 11.
+    """
+    import re
+    t = (text or "").strip().lower()
+    if not t:
+        return None
+
+    m = re.search(r"\b([01]?\d|2[0-3])[:.\-]([0-5]\d)\b", t)
+    if m:
+        return f"{int(m.group(1)):02d}:{m.group(2)}"
+
+    m = re.search(r"\b([01]?\d|2[0-3])\s*e\s*([0-5]\d)\b", t)
+    if m:
+        return f"{int(m.group(1)):02d}:{m.group(2)}"
+
+    m = re.search(r"\b([01]\d|2[0-3])([0-5]\d)\b", t)
+    if m:
+        return f"{m.group(1)}:{m.group(2)}"
+
+    m = re.search(r"\b(?:alle|ore)\s*([01]?\d|2[0-3])\b", t)
+    if m:
+        return f"{int(m.group(1)):02d}:00"
+
+    return None
+
+
+def _extract_slot_number(text: str, max_n: int) -> int | None:
+    """Estrae un numero di slot 1..max_n dal messaggio."""
+    import re
+    t = (text or "").strip().lower()
+    if not t or max_n <= 0:
+        return None
+
+    m = re.search(r"\b(?:il|numero|opzione|slot|#)\s*([1-9]\d?)\b", t)
+    if m:
+        n = int(m.group(1))
+        if 1 <= n <= max_n:
+            return n
+
+    m = re.fullmatch(r"\s*([1-9]\d?)\s*[.)]?\s*", t)
+    if m:
+        n = int(m.group(1))
+        if 1 <= n <= max_n:
+            return n
+
+    # "2 alle 11:30", "3 e 11 e 30", "2 va bene"
+    m = re.match(r"\s*([1-9]\d?)\b(.*)$", t)
+    if m:
+        n = int(m.group(1))
+        rest = (m.group(2) or "").strip()
+        if 1 <= n <= max_n:
+            if not rest:
+                return n
+            if _normalize_spoken_time(rest) or _normalize_spoken_time(t):
+                return n
+            if re.match(r"^(va bene|ok|grazie|perfetto|confermo|si|sì)\b", rest):
+                return n
+
+    # Cifra 1..max_n isolata non facente parte di un orario
+    if len(t) <= 48:
+        time_matches = []
+        for pat in (
+            r"\b([01]?\d|2[0-3])[:.\-]([0-5]\d)\b",
+            r"\b([01]?\d|2[0-3])\s*e\s*([0-5]\d)\b",
+        ):
+            for tm in re.finditer(pat, t):
+                time_matches.append((tm.start(), tm.end()))
+        for m in re.finditer(r"\b([1-9]\d?)\b", t):
+            n = int(m.group(1))
+            if not (1 <= n <= max_n):
+                continue
+            inside_time = any(s <= m.start() and m.end() <= e for s, e in time_matches)
+            if inside_time:
+                continue
+            return n
+
+    return None
+
+
+def _message_looks_like_slot_choice(text: str, max_n: int) -> bool:
+    """True se sembra una scelta sul menu slot, non una nuova ricerca."""
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    if any(p in t for p in (
+        "un altro giorno", "altra settimana", "settimana prossima",
+        "altro giorno", "cambia giorno", "non va bene nessuno",
+        "nessuno di quest", "vorrei prenotare", "quando posso",
+        "disponibilità diverse", "altre disponibilità",
+    )):
+        return False
+    if _extract_slot_number(t, max_n) is not None:
+        return True
+    if _normalize_spoken_time(t) is not None:
+        return True
+    return False
+
+
+
 def _classify_awaiting_name_message(text: str) -> str:
     """
     Classificazione deterministica del messaggio mentre aspettiamo il nome.
@@ -870,6 +973,35 @@ async def process_messages(messages: list[dict]):
                     new_collected["awaiting_person_name"] = True
                     new_collected["_remind_name_after_info"] = True
 
+
+    # --- Gate deterministico: scelta slot su last_slots ---
+    # Se abbiamo appena mostrato un menu e il messaggio è un numero/orario,
+    # non lasciamo che Step 1 lo trasformi in una nuova SEARCH_SLOTS.
+    _slots_menu = new_collected.get("last_slots") or []
+    if (
+        _slots_menu
+        and not new_collected.get("awaiting_person_name")
+        and not parameters.get("person_name")
+        and _message_looks_like_slot_choice(combined_text, len(_slots_menu))
+    ):
+        _sn = _extract_slot_number(combined_text, len(_slots_menu))
+        _tm = _normalize_spoken_time(combined_text)
+        # Se Step 1 ha già messo valori coerenti, preferisci i nostri
+        # deterministici sul testo grezzo (più affidabili su "2", "11 e 30").
+        parameters = dict(parameters)
+        if _sn is not None:
+            parameters["slot_number"] = _sn
+        if _tm is not None:
+            parameters["exact_time"] = _tm
+        parameters["confirmation"] = parameters.get("confirmation") or None
+        action_requested = "CONFIRM_BOOKING"
+        print(
+            f"[SLOT-GATE] forza CONFIRM_BOOKING "
+            f"slot_number={parameters.get('slot_number')} "
+            f"exact_time={parameters.get('exact_time')} "
+            f"text={combined_text!r}"
+        )
+
     # Catturato SUBITO, prima che qualunque ramo sotto resetti "collected_data":
     # sono gli slot mostrati realmente al cliente nel turno precedente.
     previous_last_slots = collected.get("last_slots") or []
@@ -1089,7 +1221,8 @@ async def process_messages(messages: list[dict]):
                         except (TypeError, ValueError):
                             pass
 
-                    if wanted and candidate.get("time") != wanted and not phantom_from_index:
+                    cand_time = _normalize_time_str(candidate.get("time")) or (candidate.get("time") or "")[:5]
+                    if wanted and cand_time != wanted and not phantom_from_index:
                         mismatch_slot = candidate
                     else:
                         resolved_slot = candidate
@@ -1113,7 +1246,8 @@ async def process_messages(messages: list[dict]):
             elif exact_time:
                 wanted = _normalize_time_str(exact_time)
                 for slot in all_slots_in_memory:
-                    if wanted and slot.get("time") == wanted:
+                    st = _normalize_time_str(slot.get("time")) or (slot.get("time") or "")[:5]
+                    if wanted and st == wanted:
                         resolved_slot = slot
                         break
 
