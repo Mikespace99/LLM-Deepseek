@@ -121,9 +121,29 @@ def _build_context(
         "service_name": (
             matched.get("name")
             if matched
-            else collected_data.get("service")
+            else (
+                collected_data.get("service")
+                or (
+                    # fallback: se c'è un solo servizio nel tenant, usalo
+                    services[0].get("name")
+                    if len(services) == 1
+                    else (
+                        services[0].get("name")
+                        if services and not collected_data.get("service")
+                        else None
+                    )
+                )
+            )
         ),
-        "service_id": matched.get("id") if matched else None,
+        "service_id": (
+            matched.get("id")
+            if matched
+            else (
+                services[0].get("id")
+                if services and (len(services) == 1 or not collected_data.get("service"))
+                else None
+            )
+        ),
         "duration_minutes": duration_minutes,
         "buffer_before": buffer_before,
         "buffer_after": buffer_after,
@@ -943,18 +963,29 @@ def create_booking(
 
     slot = ctx.get("selected_slot") or {}
 
-    valid = bool(
-        slot.get("datetime")
-        and ctx.get("service_name")
-        and ctx.get("person_name")
-    )
+    missing = []
+    if not slot.get("datetime"):
+        missing.append("slot.datetime")
+    if not ctx.get("service_name"):
+        missing.append("service_name")
+    if not ctx.get("person_name"):
+        missing.append("person_name")
+
+    valid = not missing
 
     if not valid:
+        print(
+            f"[create_booking] missing_data: {missing} | "
+            f"person_name={ctx.get('person_name')!r} "
+            f"service={ctx.get('service_name')!r} "
+            f"slot_keys={list(slot.keys()) if slot else None}"
+        )
         return {
             "selected_slot": slot,
             "result": {
                 "success": False,
                 "error": "missing_data",
+                "missing_fields": missing,
             },
         }
 
