@@ -18,11 +18,15 @@ from app.booking.engine import (
     create_booking,
     revalidate_slots,
     search_availability,
+    search_available_days,
+    search_times_for_day,
 )
 from app.config import Config
 from app.constants import (
     STEP_NONE,
     STEP_SHOWING_SLOTS,
+    STEP_SHOWING_DAYS,
+    STEP_SHOWING_TIMES,
     WORKFLOW_BOOKING,
     WORKFLOW_IDLE,
 )
@@ -264,6 +268,85 @@ def _describe_search_criteria(parameters: dict) -> str | None:
     }.get(time_pref, "")
 
     return f"{base}{time_suffix}"
+
+
+
+
+def _preferences_are_open(parameters: dict) -> bool:
+    """
+    True se il cliente non ha indicato un giorno/periodo specifico:
+    in quel caso mostriamo il menu dei primi giorni liberi invece
+    di una lista di slot sparsi.
+    """
+    if not parameters:
+        return True
+    return not any(
+        parameters.get(k)
+        for k in (
+            "date_from",
+            "date_to",
+            "period",
+            "weekday",
+            "week_part",
+            "exact_time",
+        )
+    )
+
+
+def _format_day_fascia(day: dict) -> str:
+    parts = []
+    if day.get("morning"):
+        parts.append("mattina")
+    if day.get("afternoon"):
+        parts.append("pomeriggio")
+    fascia = " e ".join(parts) if parts else "orari disponibili"
+    return f"{day.get('label', day.get('date'))} ({fascia})"
+
+
+def _resolve_day_choice(
+    proposed_days: list,
+    slot_number,
+    parameters: dict,
+) -> dict | None:
+    """
+    Risolve la scelta di un giorno dal menu proposed_days.
+    Accetta numero (1-based) oppure testo che matcha il label.
+    """
+    if not proposed_days:
+        return None
+
+    # Per numero
+    if slot_number is not None:
+        try:
+            idx = int(slot_number) - 1
+            if 0 <= idx < len(proposed_days):
+                return proposed_days[idx]
+        except (TypeError, ValueError):
+            pass
+
+    # Per weekday / testo grezzo nei parameters
+    weekday = (parameters.get("weekday") or "").strip().lower()
+    if weekday:
+        for d in proposed_days:
+            label = (d.get("label") or "").lower()
+            if weekday in label:
+                return d
+
+    return None
+
+
+def _build_days_text(days: list) -> str:
+    """Testo numerato del menu giorni (deterministico, niente AI)."""
+    if not days:
+        return ""
+    lines = []
+    for i, d in enumerate(days, 1):
+        lines.append(f"{i}. {_format_day_fascia(d)}")
+    return (
+        "\n"
+        + "\n".join(lines)
+        + "\n\nScrivi il numero oppure il giorno che preferisci."
+    )
 
 
 def _resolve_search_slots(
@@ -552,6 +635,26 @@ async def process_messages(messages: list[dict]):
         recent = append_message(conversation["id"], role="user", content=m["message"], current_messages=recent)
     conversation["recent_messages"] = recent
 
+    # Ack immediato solo all'inizio di una ricerca (niente menu/slot già
+    # in sospeso): riduce i messaggi impulsivi durante l'elaborazione.
+    # Sulle scelte numeriche ("2", "10:30") non serve e sarebbe rumoroso.
+    _collected_early = conversation.get("collected_data") or {}
+    _has_pending_menu = bool(
+        _collected_early.get("last_slots")
+        or _collected_early.get("proposed_days")
+    )
+    if not _has_pending_menu:
+        wa_info_early = tenant.get("info") or {}
+        try:
+            await send_whatsapp_message(
+                phone,
+                "Un attimo, verifico…",
+                wa_info_early.get("access_token") or Config.WHATSAPP_TOKEN,
+                wa_info_early.get("phone_number_id") or Config.WHATSAPP_PHONE_NUMBER_ID,
+            )
+        except Exception as ack_err:
+            print(f"[ACK] invio fallito (proseguo comunque): {ack_err}")
+
     # La sessione precedente è scaduta: get_or_create_conversation ha già
     # creato un nuovo record vuoto (collected_data={}). Non blocchiamo più
     # la risposta qui: se il messaggio è autosufficiente (es. "vorrei un
@@ -627,21 +730,111 @@ async def process_messages(messages: list[dict]):
     print(f"[STEP 2/4] Elaborazione backend per: {action_requested}")
 
     # Sotto-flusso A: Ricerca Disponibilità
-    if action_requested == "SEARCH_SLOTS":
-        new_collected, slots_text_to_append = _resolve_search_slots(
-            tenant, knowledge, parameters, new_collected, previous_last_slots, backend_results
+    # ------------------------------------------------------------
+    # Sotto-flusso A0: scelta di un giorno dal menu proposed_days
+    # (il cliente ha risposto "1"/"2"/"martedì" mentre stavamo
+    # mostrando i giorni, non ancora gli orari).
+    # Step 1 può classificare questo come CONFIRM_BOOKING o
+    # SEARCH_SLOTS: in entrambi i casi, se ci sono proposed_days
+    # e non ci sono ancora last_slots, trattiamo la risposta come
+    # selezione del giorno.
+    # ------------------------------------------------------------
+    _pending_days = new_collected.get("proposed_days") or []
+    _has_slots = bool(new_collected.get("last_slots"))
+    _choice_num = parameters.get("slot_number")
+    _day_pick = None
+
+    if (
+        _pending_days
+        and not _has_slots
+        and action_requested in ("SEARCH_SLOTS", "CONFIRM_BOOKING")
+    ):
+        _day_pick = _resolve_day_choice(
+            _pending_days, _choice_num, parameters
         )
+
+    if _day_pick is not None:
+        # Giorno scelto → cerca gli orari di quel giorno
+        target_date = _day_pick["date"]
+        new_collected["selected_day"] = _day_pick
+        new_collected["proposed_days"] = []  # consumato
+
+        try:
+            times_res = search_times_for_day(
+                tenant=tenant,
+                knowledge=knowledge,
+                collected_data=new_collected,
+                target_date=target_date,
+            )
+            slots = times_res.get("candidate_slots") or []
+            if slots:
+                backend_results["slot_found"] = True
+                backend_results["slots_list"] = slots
+                backend_results["search_criteria_label"] = _day_pick.get("label")
+                backend_results["day_pick_resolved"] = True
+                new_collected["last_slots"] = slots
+                labels = _slot_labels(slots)
+                slots_text_to_append = (
+                    "\n"
+                    + "\n".join(f"{i+1}. {label}" for i, label in enumerate(labels))
+                    + "\n\nQuale preferisci? (puoi rispondere con il numero o con l'orario)"
+                )
+            else:
+                backend_results["error_type"] = "no_slots_found"
+        except Exception as e:
+            print(f"[BACKEND ERROR] search_times_for_day: {e}")
+            backend_results["error_type"] = "technical_error"
+
+    # ------------------------------------------------------------
+    # Sotto-flusso A: Ricerca disponibilità
+    # - senza giorno specifico → menu dei primi giorni liberi
+    # - con giorno/periodo specifico → slot diretti (comportamento classico)
+    # ------------------------------------------------------------
+    elif action_requested == "SEARCH_SLOTS":
+        if _preferences_are_open(parameters):
+            # Menu giorni guidato
+            try:
+                days_res = search_available_days(
+                    tenant=tenant,
+                    knowledge=knowledge,
+                    collected_data=new_collected,
+                    max_days=3,
+                )
+                days = days_res.get("available_days") or []
+                if days:
+                    new_collected["proposed_days"] = days
+                    new_collected["last_slots"] = []  # non ancora orari
+                    backend_results["slot_found"] = True
+                    backend_results["days_menu"] = True
+                    backend_results["search_criteria_label"] = "i prossimi giorni"
+                    slots_text_to_append = _build_days_text(days)
+                else:
+                    backend_results["error_type"] = "no_slots_found"
+            except Exception as e:
+                print(f"[BACKEND ERROR] search_available_days: {e}")
+                backend_results["error_type"] = "technical_error"
+        else:
+            # Comportamento classico: ricerca slot con criteri specifici
+            new_collected, slots_text_to_append = _resolve_search_slots(
+                tenant, knowledge, parameters, new_collected, previous_last_slots, backend_results
+            )
 
     # Sotto-flusso B: Prenotazione Deterministica e Transazione (Step 4)
     elif action_requested == "CONFIRM_BOOKING":
         all_slots_in_memory = (new_collected.get("last_slots") or []) + (new_collected.get("historical_slots") or [])
 
         if not all_slots_in_memory:
-            # Non c'è proprio nulla da risolvere (sessione azzerata per
-            # saluto o per scadenza): non ha senso interpretare "slot 3"
-            # o un orario, non sappiamo a cosa si riferiscano. Chiediamo
-            # di ripetere la richiesta da capo invece di indovinare.
-            backend_results["error_type"] = "no_context_available"
+            # Se ci sono ancora proposed_days non risolti, non è
+            # "no context": il cliente ha forse risposto in modo
+            # non riconoscibile al menu giorni.
+            if new_collected.get("proposed_days"):
+                backend_results["error_type"] = "day_choice_unclear"
+            else:
+                # Non c'è proprio nulla da risolvere (sessione azzerata per
+                # saluto o per scadenza): non ha senso interpretare "slot 3"
+                # o un orario, non sappiamo a cosa si riferiscano. Chiediamo
+                # di ripetere la richiesta da capo invece di indovinare.
+                backend_results["error_type"] = "no_context_available"
         else:
             # Accumulo persistente (lato backend, non lato AI): se il
             # cliente ha già indicato un numero e/o un orario in un
@@ -933,7 +1126,10 @@ async def process_messages(messages: list[dict]):
         "ask_new_time_preference",
     }
     skip_ai_response = (
-        action_requested == "CONFIRM_BOOKING"
+        (
+            action_requested == "CONFIRM_BOOKING"
+            and not backend_results.get("day_pick_resolved")
+        )
         or (
             action_requested == "MODIFY_BOOKING"
             and backend_results.get("error_type") in _DETERMINISTIC_MODIFY_ERROR_TYPES
@@ -945,12 +1141,47 @@ async def process_messages(messages: list[dict]):
         reply_text = ""
     else:
         print("[STEP 3] Invocazione AI Redattrice con i dati reali del backend...")
-        reply_text = run_step3_response(message_text=combined_text, backend_results=backend_results, history_text=history_str)
+        knowledge_texts = {
+            "services_text": (knowledge or {}).get("services_text") or "",
+            "locations_text": (knowledge or {}).get("locations_text") or "",
+            "working_hours_text": (knowledge or {}).get("working_hours_text") or "",
+        }
+        reply_text = run_step3_response(
+            message_text=combined_text,
+            backend_results=backend_results,
+            history_text=history_str,
+            knowledge_texts=knowledge_texts,
+        )
 
-    if action_requested == "SEARCH_SLOTS" and backend_results["slot_found"]:
+    if slots_text_to_append and backend_results.get("slot_found"):
+        # Copre: SEARCH_SLOTS classico, menu giorni, scelta giorno→orari, MODIFY
         reply_text = f"{reply_text}\n{slots_text_to_append}"
-    elif action_requested == "MODIFY_BOOKING" and backend_results["slot_found"]:
+    elif action_requested == "MODIFY_BOOKING" and backend_results["slot_found"] and slots_text_to_append:
         reply_text = f"{reply_text}\n{slots_text_to_append}"
+
+    # --- JUST_TALK: dopo la risposta informativa, riproponi lo stato in sospeso ---
+    # Il ramo JUST_TALK non tocca mai new_collected (stato intatto).
+    # Se c'erano slot proposti, li ri-elenca in modo deterministico così
+    # il cliente non deve ripescare la cronologia.
+    elif action_requested == "JUST_TALK":
+        pending_slots = new_collected.get("last_slots") or []
+        pending_days = new_collected.get("proposed_days") or []
+        if pending_slots and reply_text:
+            labels = _slot_labels(pending_slots)
+            resume_block = (
+                "\n\nTornando alla prenotazione in corso, queste erano le disponibilità:\n"
+                + "\n".join(f"{i+1}. {label}" for i, label in enumerate(labels))
+                + "\n\nQuale preferisci? (puoi rispondere con il numero o con l'orario)"
+            )
+            reply_text = f"{reply_text}{resume_block}"
+        elif pending_days and reply_text:
+            resume_block = (
+                "\n\nTornando alla prenotazione in corso, queste erano le disponibilità:\n"
+                + "\n".join(f"{i}. {_format_day_fascia(d)}" for i, d in enumerate(pending_days, 1))
+                + "\n\nScrivi il numero oppure il giorno che preferisci."
+            )
+            reply_text = f"{reply_text}{resume_block}"
+
     elif backend_results.get("booking_success"):
         old_label = backend_results.get("cancelled_old_appointment_label")
         new_label = backend_results.get("confirmed_slot_label")
@@ -967,6 +1198,16 @@ async def process_messages(messages: list[dict]):
         reply_text = tpl.booking_slot_occupied(backend_results.get("failed_slot_label"))
     elif backend_results.get("error_type") == "slot_not_found_in_memory":
         reply_text = tpl.SLOT_NOT_FOUND_IN_MEMORY
+    elif backend_results.get("error_type") == "day_choice_unclear":
+        # Riproponi il menu giorni in modo deterministico
+        days = new_collected.get("proposed_days") or []
+        if days:
+            reply_text = (
+                "Non ho capito quale giorno preferisci.\n"
+                + _build_days_text(days).lstrip("\n")
+            )
+        else:
+            reply_text = tpl.UNCLEAR
     elif backend_results.get("error_type") == "no_context_available":
         reply_text = tpl.CONVERSATION_EXPIRED
     elif backend_results.get("error_type") == "no_appointment_to_modify":
@@ -1001,6 +1242,7 @@ async def process_messages(messages: list[dict]):
     # negoziazione al reset-su-saluto.
     has_live_negotiation = bool(
         new_collected.get("last_slots")
+        or new_collected.get("proposed_days")
         or new_collected.get("pending_confirmation_slot")
         or new_collected.get("pending_slot_number")
         or new_collected.get("pending_exact_time")
@@ -1009,7 +1251,13 @@ async def process_messages(messages: list[dict]):
     )
 
     if has_live_negotiation:
-        workflow_to_save, step_to_save = WORKFLOW_BOOKING, STEP_SHOWING_SLOTS
+        workflow_to_save = WORKFLOW_BOOKING
+        if new_collected.get("proposed_days") and not new_collected.get("last_slots"):
+            step_to_save = STEP_SHOWING_DAYS
+        elif new_collected.get("last_slots"):
+            step_to_save = STEP_SHOWING_TIMES if new_collected.get("selected_day") else STEP_SHOWING_SLOTS
+        else:
+            step_to_save = STEP_SHOWING_SLOTS
     else:
         workflow_to_save, step_to_save = WORKFLOW_IDLE, STEP_NONE
 
