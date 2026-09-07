@@ -895,13 +895,34 @@ async def process_messages(messages: list[dict]):
     new_collected = dict(collected)
 
     # --- Gestione messaggio mentre aspettiamo il nome intestatario ---
-    # Gerarchia: info/cancel deterministico → nome chiaro → AI solo nel dubbio.
     _awaiting_name = bool(
         new_collected.get("awaiting_person_name")
         or (
             (new_collected.get("pending_confirmation_slot") or new_collected.get("selected_slot"))
             and not new_collected.get("person_name")
         )
+        or (
+            action_requested == "CONFIRM_BOOKING"
+            and not parameters.get("person_name")
+            and not new_collected.get("person_name")
+            and (
+                new_collected.get("pending_confirmation_slot")
+                or new_collected.get("selected_slot")
+                or new_collected.get("last_slots")
+            )
+            and not _message_looks_like_slot_choice(
+                combined_text, len(new_collected.get("last_slots") or []) or 3
+            )
+        )
+    )
+    print(
+        f"[NAME-GATE] check awaiting={_awaiting_name} "
+        f"flag={bool(new_collected.get('awaiting_person_name'))} "
+        f"pending={bool(new_collected.get('pending_confirmation_slot'))} "
+        f"selected={bool(new_collected.get('selected_slot'))} "
+        f"last_slots={len(new_collected.get('last_slots') or [])} "
+        f"person_name_param={parameters.get('person_name')!r} "
+        f"action={action_requested} text={combined_text!r}"
     )
     if (
         _awaiting_name
@@ -910,43 +931,40 @@ async def process_messages(messages: list[dict]):
         and (combined_text or "").strip()
     ):
         _kind = _classify_awaiting_name_message(combined_text)
-        print(f"[NAME-GATE] kind={_kind} text={combined_text!r}")
+        print(f"[NAME-GATE] kind={_kind}")
 
         if _kind == "name":
             parameters = dict(parameters)
             parameters["person_name"] = combined_text.strip()
             parameters["confirmation"] = "yes"
+            parameters["slot_number"] = None
+            parameters["exact_time"] = None
+            new_collected["pending_slot_number"] = None
+            new_collected["pending_exact_time"] = None
             action_requested = "CONFIRM_BOOKING"
             print(f"[NAME] accettato come nome: {parameters['person_name']}")
 
         elif _kind == "info_question":
-            # Rispondi all'info, resta in attesa del nome (non consumare lo slot)
             action_requested = "JUST_TALK"
             new_collected["awaiting_person_name"] = True
-            backend_results_name_hint = True  # usato sotto per append reminder
-            # marker su collected per il reminder in risposta
             new_collected["_remind_name_after_info"] = True
 
         elif _kind == "cancel":
             action_requested = "JUST_TALK"
             new_collected = {}
-            # verrà gestito come chiusura semplice
 
         elif _kind == "yesno":
-            # Un "sì" isolato mentre chiediamo il nome non è un nome
             action_requested = "JUST_TALK"
             new_collected["awaiting_person_name"] = True
             new_collected["_remind_name_after_info"] = True
 
         else:
-            # Dubbio: chiedi a Step 1-light / interpretazione già fatta da Step 1
-            # Se Step 1 ha già messo person_name, usalo; altrimenti resta in attesa.
             if parameters.get("person_name"):
                 parameters = dict(parameters)
                 parameters["confirmation"] = "yes"
+                parameters["slot_number"] = None
                 action_requested = "CONFIRM_BOOKING"
             else:
-                # Prova classificazione AI dedicata (opzionale, best-effort)
                 try:
                     from app.ai.intent_parser import classify_name_doubt
                     doubt = classify_name_doubt(combined_text)
@@ -955,7 +973,12 @@ async def process_messages(messages: list[dict]):
                         parameters = dict(parameters)
                         parameters["person_name"] = doubt["person_name"]
                         parameters["confirmation"] = "yes"
+                        parameters["slot_number"] = None
+                        parameters["exact_time"] = None
+                        new_collected["pending_slot_number"] = None
+                        new_collected["pending_exact_time"] = None
                         action_requested = "CONFIRM_BOOKING"
+                        print(f"[NAME] AI dubbio → nome: {parameters['person_name']}")
                     elif doubt.get("kind") == "info_question":
                         action_requested = "JUST_TALK"
                         new_collected["awaiting_person_name"] = True
@@ -964,15 +987,39 @@ async def process_messages(messages: list[dict]):
                         action_requested = "JUST_TALK"
                         new_collected = {}
                     else:
+                        # Dubbio non risolto: se sembra un nome corto, accettalo
+                        _words = (combined_text or "").strip().split()
+                        if (
+                            1 <= len(_words) <= 4
+                            and "?" not in (combined_text or "")
+                            and not any(ch.isdigit() for ch in combined_text)
+                        ):
+                            parameters = dict(parameters)
+                            parameters["person_name"] = combined_text.strip()
+                            parameters["confirmation"] = "yes"
+                            parameters["slot_number"] = None
+                            new_collected["pending_slot_number"] = None
+                            action_requested = "CONFIRM_BOOKING"
+                            print(f"[NAME] dubbio→accetto comunque: {parameters['person_name']}")
+                        else:
+                            action_requested = "JUST_TALK"
+                            new_collected["awaiting_person_name"] = True
+                            new_collected["_remind_name_after_info"] = True
+                except Exception as e:
+                    print(f"[NAME-DOUBT] fallback: {e}")
+                    _words = (combined_text or "").strip().split()
+                    if 1 <= len(_words) <= 4 and "?" not in (combined_text or ""):
+                        parameters = dict(parameters)
+                        parameters["person_name"] = combined_text.strip()
+                        parameters["confirmation"] = "yes"
+                        parameters["slot_number"] = None
+                        new_collected["pending_slot_number"] = None
+                        action_requested = "CONFIRM_BOOKING"
+                        print(f"[NAME] fallback permissivo: {parameters['person_name']}")
+                    else:
                         action_requested = "JUST_TALK"
                         new_collected["awaiting_person_name"] = True
                         new_collected["_remind_name_after_info"] = True
-                except Exception as e:
-                    print(f"[NAME-DOUBT] fallback: {e}")
-                    action_requested = "JUST_TALK"
-                    new_collected["awaiting_person_name"] = True
-                    new_collected["_remind_name_after_info"] = True
-
 
     # --- Gate deterministico: scelta slot su last_slots ---
     # Se abbiamo appena mostrato un menu e il messaggio è un numero/orario,
@@ -1564,6 +1611,10 @@ async def process_messages(messages: list[dict]):
         reply_text = tpl.slot_time_mismatch(backend_results.get("mismatch_slot_label"))
     elif backend_results.get("error_type") == "missing_data":
         reply_text = tpl.booking_missing_name(backend_results.get("failed_slot_label"))
+        new_collected["awaiting_person_name"] = True
+        if backend_results.get("failed_slot_label") and not new_collected.get("selected_slot"):
+            # assicurati di avere un riferimento allo slot in sospeso
+            pass
     elif backend_results.get("error_type") == "slot_occupied":
         reply_text = tpl.booking_slot_occupied(backend_results.get("failed_slot_label"))
     elif backend_results.get("error_type") == "slot_not_found_in_memory":
