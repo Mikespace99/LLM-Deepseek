@@ -273,36 +273,61 @@ def _describe_search_criteria(parameters: dict) -> str | None:
 
 
 
-def _looks_like_person_name(text: str) -> bool:
+def _classify_awaiting_name_message(text: str) -> str:
     """
-    Euristica deterministica: il messaggio sembra un nome/cognome
-    e non una scelta di slot, un sì/no o una nuova richiesta.
+    Classificazione deterministica del messaggio mentre aspettiamo il nome.
+    Ritorna: "name" | "info_question" | "cancel" | "yesno" | "doubt"
     """
-    t = (text or "").strip()
-    if not t or len(t) > 60:
-        return False
-    low = t.lower()
-    # Escludi conferme, numeri di slot, richieste operative
-    if low in {"si", "sì", "no", "ok", "va bene", "confermo", "certo", "esatto"}:
-        return False
-    if any(p in low for p in (
-        "prenot", "appuntament", "spost", "cancel", "annull",
-        "disponib", "quando", "quanto", "parcheggio", "orari",
-        "grazie", "buongiorno", "buonasera", "salve",
-    )):
-        return False
-    # Solo cifre o "il 3" → non è un nome
-    if t.isdigit():
-        return False
     import re
-    if re.fullmatch(r"il\s*\d+", low):
-        return False
-    # 1–5 parole, principalmente lettere
+
+    t = (text or "").strip()
+    if not t:
+        return "doubt"
+
+    low = t.lower().strip()
+
+    # Annulla
+    if any(p in low for p in (
+        "lascia stare", "annulla", "non voglio più", "dimentica", "stop",
+    )):
+        return "cancel"
+
+    # Sì/No puri
+    if low in {
+        "si", "sì", "no", "ok", "va bene", "confermo", "certo", "esatto",
+        "no grazie", "no no",
+    }:
+        return "yesno"
+
+    # Domanda / richiesta informativa chiara
+    info_markers = (
+        "quanto", "costo", "costa", "prezzo", "prezzi", "tariffa",
+        "parcheggio", "parch", "dove siete", "indirizzo", "orari",
+        "che orari", "aperti", "chiusi", "accettate", "bancomat",
+        "carta", "pagare", "pagamento", "?",
+    )
+    if any(m in low for m in info_markers):
+        return "info_question"
+
+    # Solo numero / scelta slot residua
+    if t.isdigit() or re.fullmatch(r"il\s*\d+", low):
+        return "doubt"
+
+    # Sembra un nome: 1–4 parole, principalmente lettere, niente ?
     words = t.split()
-    if not (1 <= len(words) <= 5):
-        return False
-    letter_words = sum(1 for w in words if any(c.isalpha() for c in w))
-    return letter_words >= max(1, len(words) - 1)
+    if 1 <= len(words) <= 4 and "?" not in t:
+        letter_words = sum(1 for w in words if any(c.isalpha() for c in w))
+        if letter_words >= len(words) and not any(ch.isdigit() for ch in t):
+            # Escludi frasi operative residue
+            if not any(p in low for p in (
+                "prenot", "appuntament", "spost", "disponib", "quando",
+                "grazie", "buongiorno", "buonasera", "salve",
+                " per ", "mia moglie", "mio marito", "mio figlio", "mia figlia",
+                "a nome", "intesta",
+            )) and not low.startswith(("è ", "e ", "per ")):
+                return "name"
+
+    return "doubt"
 
 
 def _preferences_are_open(parameters: dict) -> bool:
@@ -766,21 +791,84 @@ async def process_messages(messages: list[dict]):
     collected = conversation.get("collected_data") or {}
     new_collected = dict(collected)
 
-    # Se stiamo aspettando il nome intestatario (slot già scelto e
-    # confermato, manca solo person_name) e il messaggio sembra un nome,
-    # forzalo in modo deterministico: Step 1 spesso classifica "Mario Rossi"
-    # come JUST_TALK e non valorizza person_name.
+    # --- Gestione messaggio mentre aspettiamo il nome intestatario ---
+    # Gerarchia: info/cancel deterministico → nome chiaro → AI solo nel dubbio.
+    _awaiting_name = bool(
+        new_collected.get("awaiting_person_name")
+        or (
+            (new_collected.get("pending_confirmation_slot") or new_collected.get("selected_slot"))
+            and not new_collected.get("person_name")
+        )
+    )
     if (
-        new_collected.get("pending_confirmation_slot")
-        and not new_collected.get("person_name")
+        _awaiting_name
         and not parameters.get("person_name")
-        and _looks_like_person_name(combined_text)
+        and not new_collected.get("person_name")
+        and (combined_text or "").strip()
     ):
-        parameters = dict(parameters)
-        parameters["person_name"] = combined_text.strip()
-        parameters["confirmation"] = parameters.get("confirmation") or "yes"
-        action_requested = "CONFIRM_BOOKING"
-        print(f"[NAME] riconosciuto nome intestatario: {parameters['person_name']}")
+        _kind = _classify_awaiting_name_message(combined_text)
+        print(f"[NAME-GATE] kind={_kind} text={combined_text!r}")
+
+        if _kind == "name":
+            parameters = dict(parameters)
+            parameters["person_name"] = combined_text.strip()
+            parameters["confirmation"] = "yes"
+            action_requested = "CONFIRM_BOOKING"
+            print(f"[NAME] accettato come nome: {parameters['person_name']}")
+
+        elif _kind == "info_question":
+            # Rispondi all'info, resta in attesa del nome (non consumare lo slot)
+            action_requested = "JUST_TALK"
+            new_collected["awaiting_person_name"] = True
+            backend_results_name_hint = True  # usato sotto per append reminder
+            # marker su collected per il reminder in risposta
+            new_collected["_remind_name_after_info"] = True
+
+        elif _kind == "cancel":
+            action_requested = "JUST_TALK"
+            new_collected = {}
+            # verrà gestito come chiusura semplice
+
+        elif _kind == "yesno":
+            # Un "sì" isolato mentre chiediamo il nome non è un nome
+            action_requested = "JUST_TALK"
+            new_collected["awaiting_person_name"] = True
+            new_collected["_remind_name_after_info"] = True
+
+        else:
+            # Dubbio: chiedi a Step 1-light / interpretazione già fatta da Step 1
+            # Se Step 1 ha già messo person_name, usalo; altrimenti resta in attesa.
+            if parameters.get("person_name"):
+                parameters = dict(parameters)
+                parameters["confirmation"] = "yes"
+                action_requested = "CONFIRM_BOOKING"
+            else:
+                # Prova classificazione AI dedicata (opzionale, best-effort)
+                try:
+                    from app.ai.intent_parser import classify_name_doubt
+                    doubt = classify_name_doubt(combined_text)
+                    print(f"[NAME-DOUBT AI] {doubt}")
+                    if doubt.get("kind") == "name" and doubt.get("person_name"):
+                        parameters = dict(parameters)
+                        parameters["person_name"] = doubt["person_name"]
+                        parameters["confirmation"] = "yes"
+                        action_requested = "CONFIRM_BOOKING"
+                    elif doubt.get("kind") == "info_question":
+                        action_requested = "JUST_TALK"
+                        new_collected["awaiting_person_name"] = True
+                        new_collected["_remind_name_after_info"] = True
+                    elif doubt.get("kind") == "cancel":
+                        action_requested = "JUST_TALK"
+                        new_collected = {}
+                    else:
+                        action_requested = "JUST_TALK"
+                        new_collected["awaiting_person_name"] = True
+                        new_collected["_remind_name_after_info"] = True
+                except Exception as e:
+                    print(f"[NAME-DOUBT] fallback: {e}")
+                    action_requested = "JUST_TALK"
+                    new_collected["awaiting_person_name"] = True
+                    new_collected["_remind_name_after_info"] = True
 
     # Catturato SUBITO, prima che qualunque ramo sotto resetti "collected_data":
     # sono gli slot mostrati realmente al cliente nel turno precedente.
@@ -904,8 +992,14 @@ async def process_messages(messages: list[dict]):
     # Sotto-flusso B: Prenotazione Deterministica e Transazione (Step 4)
     elif action_requested == "CONFIRM_BOOKING":
         all_slots_in_memory = (new_collected.get("last_slots") or []) + (new_collected.get("historical_slots") or [])
+        # Slot già scelto in un turno precedente (manca solo il nome):
+        # è contesto valido anche senza last_slots ancora in lista.
+        has_chosen_slot = bool(
+            new_collected.get("pending_confirmation_slot")
+            or new_collected.get("selected_slot")
+        )
 
-        if not all_slots_in_memory:
+        if not all_slots_in_memory and not has_chosen_slot:
             # Se ci sono ancora proposed_days non risolti, non è
             # "no context": il cliente ha forse risposto in modo
             # non riconoscibile al menu giorni.
@@ -944,15 +1038,17 @@ async def process_messages(messages: list[dict]):
             resolved_slot = None
             mismatch_slot = None
 
-            # Nome intestatario in arrivo con slot già in pending:
-            # risolvi subito dallo slot in sospeso (non ricalcolare
-            # da slot_number residuo in memoria).
-            if pending and (
+            # Nome intestatario in arrivo: usa slot in pending o selected.
+            if (
                 parameters.get("person_name") or new_collected.get("person_name")
             ):
-                resolved_slot = pending
+                resolved_slot = (
+                    pending
+                    or new_collected.get("selected_slot")
+                )
                 new_collected["pending_slot_number"] = None
                 new_collected["pending_exact_time"] = None
+                new_collected["awaiting_person_name"] = False
 
             elif (
                 parameters.get("slot_number") is None
@@ -1106,14 +1202,9 @@ async def process_messages(messages: list[dict]):
                             elif error == "missing_data":
                                 backend_results["error_type"] = "missing_data"
                                 # Lo slot resta valido: manca solo il nome.
-                                # Ripopoliamo SEMPRE pending_confirmation_slot
-                                # con lo slot appena risolto (indipendentemente
-                                # da come ci siamo arrivati: per numero,
-                                # orario, o conferma di un chiarimento), così
-                                # il prossimo turno - che darà solo il nome -
-                                # lo ritrova in automatico, senza dover essere
-                                # ricostruito dall'AI leggendo la cronologia.
                                 new_collected["pending_confirmation_slot"] = resolved_slot
+                                new_collected["selected_slot"] = resolved_slot
+                                new_collected["awaiting_person_name"] = True
                             else:
                                 backend_results["error_type"] = "technical_error"
                                 print(f"[BACKEND ERROR] create_booking fallita per un motivo non atteso: {error}")
@@ -1287,7 +1378,9 @@ async def process_messages(messages: list[dict]):
     elif action_requested == "JUST_TALK":
         # Ringraziamento / saluto di chiusura senza negoziazione attiva
         if _looks_like_thanks and not (
-            new_collected.get("last_slots") or new_collected.get("proposed_days")
+            new_collected.get("last_slots")
+            or new_collected.get("proposed_days")
+            or new_collected.get("awaiting_person_name")
         ):
             reply_text = "Prego, a presto!"
             pending_slots = []
@@ -1309,6 +1402,17 @@ async def process_messages(messages: list[dict]):
                 + "\n\nScrivi il numero oppure il giorno che preferisci."
             )
             reply_text = f"{reply_text}{resume_block}"
+
+
+        # Se eravamo in attesa del nome e abbiamo solo risposto a una info,
+        # ricorda di fornire nome e cognome.
+        if new_collected.get("_remind_name_after_info") and reply_text:
+            reply_text = (
+                reply_text.rstrip()
+                + "\n\nPer confermare l'appuntamento mi serve nome e cognome dell'intestatario."
+            )
+            new_collected.pop("_remind_name_after_info", None)
+            new_collected["awaiting_person_name"] = True
 
     elif backend_results.get("booking_success"):
         old_label = backend_results.get("cancelled_old_appointment_label")
@@ -1378,6 +1482,8 @@ async def process_messages(messages: list[dict]):
         new_collected.get("last_slots")
         or new_collected.get("proposed_days")
         or new_collected.get("pending_confirmation_slot")
+        or new_collected.get("selected_slot")
+        or new_collected.get("awaiting_person_name")
         or new_collected.get("pending_slot_number")
         or new_collected.get("pending_exact_time")
         or new_collected.get("modifying_appointment")
