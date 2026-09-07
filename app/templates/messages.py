@@ -87,7 +87,7 @@ NO_MORE_APPOINTMENTS_TO_PROPOSE = (
     "Se vuoi, indicami tu direttamente la data di quello da spostare."
 )
 
-ASK_NEW_TIME_PREFERENCE = "Per quando vorresti spostarlo?"
+ASK_NEW_TIME_PREFERENCE = "Ha qualche preferenza per quando vorrebbe spostarlo? (giorno e/o fascia oraria)"
 
 ASK_SERVICE = "Certo! Per quale servizio vorresti prenotare?"
 ASK_DATE = "Che giorno ti andrebbe bene?"
