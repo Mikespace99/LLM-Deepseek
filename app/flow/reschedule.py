@@ -139,11 +139,14 @@ def _msg_has_destination_preference(msg: str, is_pure_yes, is_pure_no) -> bool:
             "luned", "marted", "mercoled", "gioved", "venerd", "sabat", "domenic",
             "settimana", "prossim", "altro giorno", "altra data",
             "più tardi", "piu tardi", "tra una", "tra un ",
+            "mattina", "pomeriggio", "sera",
             "gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno",
             "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre",
             "sposta a", "spostalo a", "spostare a", "mettere a", "mettilo a",
         )
     )
+
+
 
 
 def handle_reschedule(
