@@ -622,32 +622,40 @@ def _resolve_search_slots(
             backend_results["slot_found"] = True
             backend_results["slots_list"] = slots
             new_collected["last_slots"] = slots
+            backend_results["open_search"] = False
 
             labels = _slot_labels(slots)
             slots_text_to_append = "\n" + "\n".join(f"{i+1}. {label}" for i, label in enumerate(labels)) + "\n\nQuale preferisci? (puoi rispondere con il numero o con l'orario)"
+
         else:
             # Nessuno slot nuovo: prima di arrenderci, riverifichiamo
             # (lato backend, MAI lato AI) se le opzioni mostrate nel
             # turno precedente sono ancora libere e le riproponiamo
             # in modo deterministico, come nel percorso di successo.
-            fallback_candidates = previous_last_slots or (new_collected.get("historical_slots") or [])
-            still_valid = revalidate_slots(
-                tenant=tenant,
-                knowledge=knowledge,
-                collected_data=new_collected,
-                slots=fallback_candidates,
-            )
-
-            if still_valid:
-                backend_results["slot_found"] = True
-                backend_results["slots_list"] = still_valid
-                backend_results["repeated_previous_slots"] = True
-                new_collected["last_slots"] = still_valid
-
-                labels = _slot_labels(still_valid)
-                slots_text_to_append = "\n" + "\n".join(f"{i+1}. {label}" for i, label in enumerate(labels)) + "\n\nQuale preferisci? (puoi rispondere con il numero o con l'orario)"
-            else:
+            tp = (new_collected.get("preferences") or {}).get("time_preference")
+            if tp in ("morning", "afternoon", "evening"):
                 backend_results["error_type"] = "no_slots_found"
+                backend_results["no_slots_fascia"] = tp
+                print(f"[SEARCH] no slots in requested fascia={tp}, no fallback")
+            else:
+                fallback_candidates = previous_last_slots or (new_collected.get("historical_slots") or [])
+                still_valid = revalidate_slots(
+                    tenant=tenant,
+                    knowledge=knowledge,
+                    collected_data=new_collected,
+                    slots=fallback_candidates,
+                )
+
+                if still_valid:
+                    backend_results["slot_found"] = True
+                    backend_results["slots_list"] = still_valid
+                    backend_results["repeated_previous_slots"] = True
+                    new_collected["last_slots"] = still_valid
+
+                    labels = _slot_labels(still_valid)
+                    slots_text_to_append = "\n" + "\n".join(f"{i+1}. {label}" for i, label in enumerate(labels)) + "\n\nQuale preferisci? (puoi rispondere con il numero o con l'orario)"
+                else:
+                    backend_results["error_type"] = "no_slots_found"
                 if result.get("search_was_narrow"):
                     backend_results["error_type"] = "no_slots_narrow"
     except Exception as e:
@@ -1842,6 +1850,26 @@ async def process_messages(messages: list[dict]):
             )
         else:
             reply_text = tpl.ASK_NEW_TIME_PREFERENCE
+    elif backend_results.get("error_type") == "no_slots_found":
+        fascia = backend_results.get("no_slots_fascia")
+        if fascia == "afternoon":
+            reply_text = (
+                "Per il periodo richiesto non ho disponibilità di pomeriggio.\n"
+                "Vuoi che cerchi in un altro periodo, oppure anche di mattina?"
+            )
+        elif fascia == "morning":
+            reply_text = (
+                "Per il periodo richiesto non ho disponibilità di mattina.\n"
+                "Vuoi che cerchi in un altro periodo, oppure anche di pomeriggio?"
+            )
+        elif fascia == "evening":
+            reply_text = (
+                "Per il periodo richiesto non ho disponibilità di sera.\n"
+                "Vuoi che cerchi in un'altra fascia?"
+            )
+        else:
+            reply_text = tpl.NO_SLOTS_FOUND
+
     elif backend_results.get("error_type") == "technical_error":
         reply_text = tpl.TECHNICAL_ERROR
 
