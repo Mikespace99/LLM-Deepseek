@@ -208,7 +208,21 @@ def _resolve_weekday_date(
 
 
 def _compute_search_window(ctx: dict) -> dict:
-    prefs = ctx["preferences"] or {}
+    prefs = dict(ctx.get("preferences") or {})
+
+    # week_part è solo start|mid|weekend; fascia oraria va in time_preference
+    _wp = str(prefs.get("week_part") or "").strip().lower()
+    if _wp in ("morning", "afternoon", "evening", "mattina", "pomeriggio", "sera"):
+        _map = {
+            "mattina": "morning",
+            "pomeriggio": "afternoon",
+            "sera": "evening",
+        }
+        if not prefs.get("time_preference"):
+            prefs["time_preference"] = _map.get(_wp, _wp)
+        prefs["week_part"] = None
+        ctx = dict(ctx)
+        ctx["preferences"] = prefs
 
     ignore_prefs = bool(
         prefs.get("ignore_preferences")
@@ -743,6 +757,16 @@ def _generate_and_filter_slots(
             if in_window:
                 filtered = in_window
                 matched_preferences = True
+            else:
+                # Preferenza fascia rispettata: se non c'è nulla in fascia,
+                # NON ricadere sugli slot fuori fascia (es. mattina quando
+                # è stato chiesto afternoon). Lista vuota → no_slots a monte.
+                filtered = []
+                matched_preferences = False
+                print(
+                    "[ENGINE] preferred_window senza match: "
+                    f"{preferred_window} su {len(all_slots)} slot grezzi"
+                )
 
     filtered = sorted(
         filtered,
