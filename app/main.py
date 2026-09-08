@@ -1137,11 +1137,18 @@ async def process_messages(messages: list[dict]):
         _tm = _normalize_spoken_time(combined_text)
         # Se Step 1 ha già messo valori coerenti, preferisci i nostri
         # deterministici sul testo grezzo (più affidabili su "2", "11 e 30").
+        # IMPORTANTE: sovrascriviamo "exact_time" SEMPRE (anche a None) quando
+        # siamo in questo ramo deterministico, non solo quando troviamo noi
+        # un orario. Altrimenti un "exact_time" indovinato da Step 1 a partire
+        # da un messaggio come "3 slot" (un solo numero, nessun secondo
+        # indizio di orario — vietato dalla regola 5 del prompt, ma l'IA può
+        # comunque sbagliare) resterebbe in "parameters" e farebbe scattare
+        # un falso "slot_time_mismatch" anche quando il numero scelto è
+        # perfettamente chiaro.
         parameters = dict(parameters)
         if _sn is not None:
             parameters["slot_number"] = _sn
-        if _tm is not None:
-            parameters["exact_time"] = _tm
+        parameters["exact_time"] = _tm
         parameters["confirmation"] = parameters.get("confirmation") or None
         action_requested = "CONFIRM_BOOKING"
         print(
@@ -1167,6 +1174,37 @@ async def process_messages(messages: list[dict]):
             parameters["confirmation"] = "no"
             action_requested = "MODIFY_BOOKING"
             print("[MODIFY-GATE] conferma NO sull'appuntamento da spostare")
+
+    # --- Gate deterministico: conferma di uno slot in sospeso ---
+    # Quando lo Step 1 o il ramo "slot_time_mismatch" ha già messo un
+    # candidato in "pending_confirmation_slot" e ha chiesto "Confermi
+    # <slot>? Rispondi 'sì' per confermare...", una risposta secca
+    # ("sì"/"no") NON deve dipendere dalla classificazione di Step 1:
+    # senza questo gate, un "Sì" isolato può essere letto come una nuova
+    # SEARCH_SLOTS (nessun numero/orario nel messaggio) invece che come
+    # conferma dello slot già proposto, riavviando una ricerca che può
+    # risultare vuota o riproporre lo stesso menu da capo.
+    _pending_slot_confirm = new_collected.get("pending_confirmation_slot")
+    if _pending_slot_confirm and not new_collected.get("awaiting_person_name"):
+        if _is_pure_yes(combined_text):
+            parameters = dict(parameters)
+            parameters["confirmation"] = "yes"
+            parameters["slot_number"] = None
+            parameters["exact_time"] = None
+            action_requested = "CONFIRM_BOOKING"
+            print("[SLOT-CONFIRM-GATE] conferma SI su pending_confirmation_slot")
+        elif _is_pure_no(combined_text):
+            parameters = dict(parameters)
+            parameters["confirmation"] = "no"
+            parameters["slot_number"] = None
+            parameters["exact_time"] = None
+            action_requested = "CONFIRM_BOOKING"
+            # Lo slot proposto viene scartato: il cliente dovrà scegliere
+            # tra quelli già mostrati nel menu (last_slots resta intatto).
+            new_collected["pending_confirmation_slot"] = None
+            new_collected["pending_slot_number"] = None
+            new_collected["pending_exact_time"] = None
+            print("[SLOT-CONFIRM-GATE] conferma NO su pending_confirmation_slot")
 
     # Se stiamo già spostando (modifying_appointment) e il cliente indica
     # un nuovo periodo senza che Step 1 resti su MODIFY, forza MODIFY
