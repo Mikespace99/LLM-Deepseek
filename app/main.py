@@ -30,6 +30,7 @@ from app.constants import (
     WORKFLOW_BOOKING,
     WORKFLOW_IDLE,
 )
+from app.flow.reschedule import handle_reschedule
 from app.context.builder import build_context
 from app.integrations.whatsapp import send_whatsapp_message
 from app.message_buffer import message_buffer
@@ -41,7 +42,6 @@ from app.repositories.conversation import (
 )
 from app.repositories.customer import (
     get_or_create_customer,
-    update_customer_name,
 )
 from app.repositories.tenant import (
     get_tenant_by_whatsapp_number,
@@ -377,7 +377,7 @@ def _extract_slot_number(text: str, max_n: int) -> int | None:
                 return n
             if _normalize_spoken_time(rest) or _normalize_spoken_time(t):
                 return n
-            if re.match(r"^(va bene|ok|grazie|perfetto|confermo|si|sì)\b", rest):
+            if re.match(r"^(va bene|ok|grazie|perfetto|confermo|si|sì|slot)\b", rest):
                 return n
 
     # Cifra 1..max_n isolata non facente parte di un orario
@@ -421,40 +421,16 @@ def _message_looks_like_slot_choice(text: str, max_n: int) -> bool:
 
 
 
-# Riconoscimento di conferma/diniego per PAROLA INTERA (\b...\b), non per
-# uguaglianza dell'intera frase: così "sì", "sì certo", "va bene grazie"
-# sono tutti riconosciuti come conferma, non solo la parola isolata.
-_CONFIRM_WORD_PATTERNS = (
-    r"\bs[iì]\b", r"\bok\b", r"\bconfermo\b", r"\bcerto\b", r"\besatto\b",
-    r"\bperfetto\b", r"\bgiusto\b", r"\bva\s+bene\b", r"\bd'?\s*accordo\b",
-)
-
-_DENY_WORD_PATTERNS = (
-    r"\bno\b", r"\bniente\b", r"\bmacch[eé]\b", r"\bneanche\b", r"\bnemmeno\b",
-    r"\bnon\s+va\s+bene\b",
-)
-
-# Frasi con cui le persone introducono il proprio nome, da scartare quando
-# proviamo a isolare il nome vero da una risposta tipo "Sì, mi chiamo Marco".
-_NAME_ANNOUNCE_PATTERNS = (
-    r"\bmi\s+chiamo\b", r"\bsono\b", r"\bil\s+mio\s+nome\s+[eè]\b", r"\ba\s+nome\s+di\b",
-)
-
-
-def _classify_awaiting_name_message(text: str) -> tuple[str, str | None]:
+def _classify_awaiting_name_message(text: str) -> str:
     """
     Classificazione deterministica del messaggio mentre aspettiamo il nome.
-    Ritorna (kind, extracted_name):
-      kind: "name" | "info_question" | "cancel" | "yesno" | "doubt"
-      extracted_name: valorizzato solo se kind == "name" (può differire dal
-      testo grezzo quando contiene anche una parola di conferma, es.
-      "Sì, mi chiamo Marco Rossi" → "Marco Rossi").
+    Ritorna: "name" | "info_question" | "cancel" | "yesno" | "doubt"
     """
     import re
 
     t = (text or "").strip()
     if not t:
-        return "doubt", None
+        return "doubt"
 
     low = t.lower().strip()
 
@@ -462,7 +438,14 @@ def _classify_awaiting_name_message(text: str) -> tuple[str, str | None]:
     if any(p in low for p in (
         "lascia stare", "annulla", "non voglio più", "dimentica", "stop",
     )):
-        return "cancel", None
+        return "cancel"
+
+    # Sì/No puri
+    if low in {
+        "si", "sì", "no", "ok", "va bene", "confermo", "certo", "esatto",
+        "no grazie", "no no",
+    }:
+        return "yesno"
 
     # Domanda / richiesta informativa chiara
     info_markers = (
@@ -472,34 +455,11 @@ def _classify_awaiting_name_message(text: str) -> tuple[str, str | None]:
         "carta", "pagare", "pagamento", "?",
     )
     if any(m in low for m in info_markers):
-        return "info_question", None
+        return "info_question"
 
     # Solo numero / scelta slot residua
     if t.isdigit() or re.fullmatch(r"il\s*\d+", low):
-        return "doubt", None
-
-    has_confirm = any(re.search(p, low) for p in _CONFIRM_WORD_PATTERNS)
-    has_deny = any(re.search(p, low) for p in _DENY_WORD_PATTERNS)
-
-    # Il messaggio contiene una parola di conferma/diniego (da sola o dentro
-    # una frase più lunga, es. "Si certo", "va bene grazie"). PRIMA di
-    # arrenderci a "è una conferma pura", verifichiamo se dopo aver tolto
-    # quella parola resta comunque un nome vero (es. "Sì, mi chiamo Marco
-    # Rossi"): in quel caso vogliamo il nome, non solo la conferma.
-    if has_confirm or has_deny:
-        remainder = low
-        for p in _CONFIRM_WORD_PATTERNS + _DENY_WORD_PATTERNS + _NAME_ANNOUNCE_PATTERNS:
-            remainder = re.sub(p, " ", remainder)
-        remainder = re.sub(r"[,\.;:!]+", " ", remainder).strip()
-        remainder_words = remainder.split()
-
-        if 1 <= len(remainder_words) <= 4 and not any(ch.isdigit() for ch in remainder):
-            candidate_name = " ".join(w.capitalize() for w in remainder_words)
-            return "name", candidate_name
-
-        # Nessun contenuto extra utilizzabile: è una conferma/diniego pura,
-        # non un nome ("Si certo", "va bene", "no grazie"...).
-        return "yesno", None
+        return "doubt"
 
     # Sembra un nome: 1–4 parole, principalmente lettere, niente ?
     words = t.split()
@@ -513,9 +473,9 @@ def _classify_awaiting_name_message(text: str) -> tuple[str, str | None]:
                 " per ", "mia moglie", "mio marito", "mio figlio", "mia figlia",
                 "a nome", "intesta",
             )) and not low.startswith(("è ", "e ", "per ")):
-                return "name", t
+                return "name"
 
-    return "doubt", None
+    return "doubt"
 
 
 def _preferences_are_open(parameters: dict) -> bool:
@@ -1073,12 +1033,12 @@ async def process_messages(messages: list[dict]):
         and not new_collected.get("person_name")
         and (combined_text or "").strip()
     ):
-        _kind, _extracted_name = _classify_awaiting_name_message(combined_text)
-        print(f"[NAME-GATE] kind={_kind} extracted={_extracted_name!r}")
+        _kind = _classify_awaiting_name_message(combined_text)
+        print(f"[NAME-GATE] kind={_kind}")
 
         if _kind == "name":
             parameters = dict(parameters)
-            parameters["person_name"] = _extracted_name or combined_text.strip()
+            parameters["person_name"] = combined_text.strip()
             parameters["confirmation"] = "yes"
             parameters["slot_number"] = None
             parameters["exact_time"] = None
@@ -1178,18 +1138,16 @@ async def process_messages(messages: list[dict]):
         _tm = _normalize_spoken_time(combined_text)
         # Se Step 1 ha già messo valori coerenti, preferisci i nostri
         # deterministici sul testo grezzo (più affidabili su "2", "11 e 30").
-        # IMPORTANTE: sovrascriviamo "exact_time" SEMPRE (anche a None) quando
-        # siamo in questo ramo deterministico, non solo quando troviamo noi
-        # un orario. Altrimenti un "exact_time" indovinato da Step 1 a partire
-        # da un messaggio come "3 slot" (un solo numero, nessun secondo
-        # indizio di orario — vietato dalla regola 5 del prompt, ma l'IA può
-        # comunque sbagliare) resterebbe in "parameters" e farebbe scattare
-        # un falso "slot_time_mismatch" anche quando il numero scelto è
-        # perfettamente chiaro.
         parameters = dict(parameters)
         if _sn is not None:
             parameters["slot_number"] = _sn
-        parameters["exact_time"] = _tm
+            # Numero slot senza orario esplicito nel messaggio:
+            # non usare exact_time inventato da Step1 (causa mismatch finti)
+            if _tm is None:
+                parameters["exact_time"] = None
+                new_collected["pending_exact_time"] = None
+        if _tm is not None:
+            parameters["exact_time"] = _tm
         parameters["confirmation"] = parameters.get("confirmation") or None
         action_requested = "CONFIRM_BOOKING"
         print(
@@ -1215,37 +1173,6 @@ async def process_messages(messages: list[dict]):
             parameters["confirmation"] = "no"
             action_requested = "MODIFY_BOOKING"
             print("[MODIFY-GATE] conferma NO sull'appuntamento da spostare")
-
-    # --- Gate deterministico: conferma di uno slot in sospeso ---
-    # Quando lo Step 1 o il ramo "slot_time_mismatch" ha già messo un
-    # candidato in "pending_confirmation_slot" e ha chiesto "Confermi
-    # <slot>? Rispondi 'sì' per confermare...", una risposta secca
-    # ("sì"/"no") NON deve dipendere dalla classificazione di Step 1:
-    # senza questo gate, un "Sì" isolato può essere letto come una nuova
-    # SEARCH_SLOTS (nessun numero/orario nel messaggio) invece che come
-    # conferma dello slot già proposto, riavviando una ricerca che può
-    # risultare vuota o riproporre lo stesso menu da capo.
-    _pending_slot_confirm = new_collected.get("pending_confirmation_slot")
-    if _pending_slot_confirm and not new_collected.get("awaiting_person_name"):
-        if _is_pure_yes(combined_text):
-            parameters = dict(parameters)
-            parameters["confirmation"] = "yes"
-            parameters["slot_number"] = None
-            parameters["exact_time"] = None
-            action_requested = "CONFIRM_BOOKING"
-            print("[SLOT-CONFIRM-GATE] conferma SI su pending_confirmation_slot")
-        elif _is_pure_no(combined_text):
-            parameters = dict(parameters)
-            parameters["confirmation"] = "no"
-            parameters["slot_number"] = None
-            parameters["exact_time"] = None
-            action_requested = "CONFIRM_BOOKING"
-            # Lo slot proposto viene scartato: il cliente dovrà scegliere
-            # tra quelli già mostrati nel menu (last_slots resta intatto).
-            new_collected["pending_confirmation_slot"] = None
-            new_collected["pending_slot_number"] = None
-            new_collected["pending_exact_time"] = None
-            print("[SLOT-CONFIRM-GATE] conferma NO su pending_confirmation_slot")
 
     # Se stiamo già spostando (modifying_appointment) e il cliente indica
     # un nuovo periodo senza che Step 1 resti su MODIFY, forza MODIFY
@@ -1441,8 +1368,22 @@ async def process_messages(messages: list[dict]):
                 new_collected["person_name"] = str(parameters.get("person_name")).strip()
                 print(f"[CONFIRM] person_name impostato: {new_collected['person_name']!r}")
 
+            # "sì" dopo proposta di chiarimento / conferma slot: usa pending
+            if pending and (
+                _is_pure_yes(combined_text)
+                or parameters.get("confirmation") == "yes"
+            ) and not new_collected.get("person_name"):
+                resolved_slot = pending
+                new_collected["selected_slot"] = pending
+                parameters = dict(parameters)
+                parameters["slot_number"] = None
+                parameters["exact_time"] = None
+                new_collected["pending_slot_number"] = None
+                new_collected["pending_exact_time"] = None
+                print("[CONFIRM] sì su pending_confirmation_slot → resolved")
+
             # Nome intestatario in arrivo: usa slot in pending o selected.
-            if new_collected.get("person_name"):
+            if new_collected.get("person_name") and resolved_slot is None:
                 resolved_slot = (
                     pending
                     or new_collected.get("selected_slot")
@@ -1497,7 +1438,16 @@ async def process_messages(messages: list[dict]):
                             pass
 
                     cand_time = _normalize_time_str(candidate.get("time")) or (candidate.get("time") or "")[:5]
-                    if wanted and cand_time != wanted and not phantom_from_index:
+                    # Mismatch solo se il cliente ha SCRITTO un orario vero
+                    # (es. "2 alle 11:00" ma lo slot 2 è alle 10:00).
+                    # "3" / "3 slot" non sono un orario → mai mismatch.
+                    user_wrote_clock = _normalize_spoken_time(combined_text) is not None
+                    if (
+                        wanted
+                        and cand_time != wanted
+                        and not phantom_from_index
+                        and user_wrote_clock
+                    ):
                         mismatch_slot = candidate
                     else:
                         resolved_slot = candidate
@@ -1548,12 +1498,36 @@ async def process_messages(messages: list[dict]):
 
                 # Non richiedere di nuovo la conferma breve se è già
                 # arrivato il nome intestatario (passo successivo).
+                # In spostamento non chiediamo il nome: lo prendiamo dal vecchio appuntamento
+                _modifying_now = new_collected.get("modifying_appointment")
+                if _modifying_now:
+                    if not new_collected.get("person_name"):
+                        new_collected["person_name"] = (
+                            _modifying_now.get("person_name")
+                            or _modifying_now.get("customer_name")
+                            or _modifying_now.get("client_name")
+                            or (customer or {}).get("name")
+                            or (customer or {}).get("full_name")
+                            or "Cliente"
+                        )
+                    if _modifying_now.get("service") and not new_collected.get("service"):
+                        new_collected["service"] = _modifying_now.get("service")
+                    new_collected["awaiting_person_name"] = False
+
                 _need_short_confirm = (
                     parameters.get("confirmation") != "yes"
                     and parameters.get("slot_number") is not None
                     and not parameters.get("person_name")
                     and not new_collected.get("person_name")
+                    and not _modifying_now  # in spostamento: conferma breve ok, ma nome già c'è
                 )
+                # In spostamento: conferma breve resta utile, ma solo se non è già yes
+                if _modifying_now:
+                    _need_short_confirm = (
+                        parameters.get("confirmation") != "yes"
+                        and parameters.get("slot_number") is not None
+                        and not _is_pure_yes(combined_text)
+                    )
                 if _need_short_confirm:
                     new_collected["pending_confirmation_slot"] = resolved_slot
                     backend_results["error_type"] = "slot_choice_confirm"
@@ -1571,6 +1545,11 @@ async def process_messages(messages: list[dict]):
                             phone_number=phone
                         )
                         result = booking_res.get("result") or {}
+                        print(
+                            f"[CONFIRM] create_booking result={result} "
+                            f"person={new_collected.get('person_name')!r} "
+                            f"slot={ (resolved_slot or {}).get('time')!r}"
+                        )
 
                         if result.get("success"):
                             backend_results["booking_success"] = True
@@ -1591,20 +1570,6 @@ async def process_messages(messages: list[dict]):
                                     print(f"[BACKEND ERROR] Nuovo appuntamento confermato, ma cancellazione del vecchio ({modifying.get('id')}) fallita: {e}")
                                     backend_results["old_appointment_cancel_failed"] = True
 
-                            # Il nome raccolto in conversazione finora viveva
-                            # solo in collected_data: non veniva mai scritto
-                            # sul cliente, quindi restava sempre assente in
-                            # Agenda/anagrafica. Lo salviamo qui, subito dopo
-                            # la conferma andata a buon fine. Non sovrascrive
-                            # un nome già presente (es. corretto manualmente
-                            # dallo staff in dashboard).
-                            _collected_name = (new_collected.get("person_name") or "").strip()
-                            if _collected_name and not (customer.get("full_name") or "").strip():
-                                try:
-                                    update_customer_name(tenant["id"], customer["id"], _collected_name)
-                                except Exception as e:
-                                    print(f"[BACKEND ERROR] Salvataggio nome cliente fallito: {e}")
-
                             new_collected = {}
                         else:
                             # Distinguiamo SEMPRE il motivo reale: un vero
@@ -1617,11 +1582,18 @@ async def process_messages(messages: list[dict]):
 
                             if error == "slot_conflict":
                                 backend_results["error_type"] = "slot_occupied"
-                                # Quello slot specifico non è più valido:
-                                # non ha senso ritentarlo automaticamente,
-                                # il cliente deve sceglierne un altro.
                                 new_collected["pending_slot_number"] = None
                                 new_collected["pending_exact_time"] = None
+                                new_collected["pending_confirmation_slot"] = None
+                                new_collected["awaiting_person_name"] = False
+                                # Togli lo slot occupato dalla lista proposta
+                                _fail_dt = (resolved_slot or {}).get("datetime")
+                                if _fail_dt and new_collected.get("last_slots"):
+                                    new_collected["last_slots"] = [
+                                        s for s in new_collected["last_slots"]
+                                        if s.get("datetime") != _fail_dt
+                                    ]
+                                print(f"[CONFIRM] slot_conflict su {backend_results.get('failed_slot_label')}")
                             elif error == "missing_data":
                                 missing_fields = result.get("missing_fields") or []
                                 print(f"[CONFIRM] create_booking missing_fields={missing_fields}")
@@ -1660,84 +1632,21 @@ async def process_messages(messages: list[dict]):
     # già stato scritto con successo, si cancella il vecchio - mai il
     # contrario, così il cliente non perde mai quello che aveva).
     elif action_requested == "MODIFY_BOOKING":
-        modifying = new_collected.get("modifying_appointment")
-
-        if modifying:
-            # Appuntamento da spostare già identificato e confermato in
-            # un turno precedente: da qui è identico a una prenotazione
-            # nuova.
-            new_collected, slots_text_to_append = _resolve_search_slots(
-                tenant, knowledge, parameters, new_collected, previous_last_slots, backend_results
-            )
-        else:
-            pending_appt = new_collected.get("pending_confirmation_appointment")
-            confirmation = parameters.get("confirmation")
-
-            if pending_appt and confirmation == "no":
-                # Non è quello: passiamo al secondo candidato, se c'è.
-                rejected = new_collected.get("rejected_appointment_ids") or []
-                rejected.append(pending_appt.get("id"))
-                new_collected["rejected_appointment_ids"] = rejected
-                new_collected["pending_confirmation_appointment"] = None
-
-                candidates = appointment_repo.list_upcoming_for_customer(
-                    tenant_id=tenant["id"], customer_id=customer["id"], limit=2
-                )
-                next_candidate = next((a for a in candidates if a.get("id") not in rejected), None)
-
-                if next_candidate:
-                    new_collected["pending_confirmation_appointment"] = next_candidate
-                    backend_results["error_type"] = "appointment_confirmation_needed"
-                    backend_results["appointment_confirmation_label"] = _appointment_label(next_candidate)
-                else:
-                    backend_results["error_type"] = "no_more_appointments_to_propose"
-
-            elif pending_appt:
-                # Confermato quale appuntamento spostare.
-                new_collected["modifying_appointment"] = pending_appt
-                new_collected["pending_confirmation_appointment"] = None
-                new_collected["rejected_appointment_ids"] = None
-
-                # Preferenze temporali: SOLO se il messaggio corrente le esprime
-                # davvero (non se Step 1 le inventa dalla cronologia, es. dal
-                # giorno del vecchio appuntamento).
-                _msg_low = (combined_text or "").lower()
-                _msg_has_time_pref = any(
-                    p in _msg_low
-                    for p in (
-                        "luned", "marted", "mercoled", "gioved", "venerd", "sabat", "domenic",
-                        "domani", "settimana", "mattina", "pomeriggio", "sera",
-                        "prossim", "tra ", "il giorno", "alle ",
-                        "gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno",
-                        "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre",
-                    )
-                ) and not _is_pure_yes(combined_text)
-
-                if _msg_has_time_pref:
-                    new_collected, slots_text_to_append = _resolve_search_slots(
-                        tenant, knowledge, parameters, new_collected, previous_last_slots, backend_results
-                    )
-                else:
-                    # "sì" / "si esatto" → chiedi preferenza, NON cercare slot
-                    backend_results["error_type"] = "ask_new_time_preference"
-                    print("[MODIFY] conferma appuntamento → chiedo preferenza nuovo orario")
-
-            else:
-                # Primo turno del flusso: individuiamo l'appuntamento più
-                # vicino nel tempo e chiediamo conferma, uno alla volta
-                # (mai una lista da disambiguare: al massimo 2 candidati).
-                candidates = appointment_repo.list_upcoming_for_customer(
-                    tenant_id=tenant["id"], customer_id=customer["id"], limit=2
-                )
-
-                if not candidates:
-                    backend_results["error_type"] = "no_appointment_to_modify"
-                else:
-                    first = candidates[0]
-                    new_collected["pending_confirmation_appointment"] = first
-                    new_collected["rejected_appointment_ids"] = []
-                    backend_results["error_type"] = "appointment_confirmation_needed"
-                    backend_results["appointment_confirmation_label"] = _appointment_label(first)
+        new_collected, backend_results, slots_text_to_append = handle_reschedule(
+            tenant=tenant,
+            customer=customer,
+            knowledge=knowledge,
+            parameters=parameters,
+            new_collected=new_collected,
+            previous_last_slots=previous_last_slots,
+            backend_results=backend_results,
+            combined_text=combined_text,
+            appointment_repo=appointment_repo,
+            resolve_search_slots=_resolve_search_slots,
+            appointment_label=_appointment_label,
+            is_pure_yes=_is_pure_yes,
+            is_pure_no=_is_pure_no,
+        )
 
     # Sotto-flusso C: Chiacchiere, Saluti o Annullamento
     else:
@@ -1882,7 +1791,23 @@ async def process_messages(messages: list[dict]):
             # assicurati di avere un riferimento allo slot in sospeso
             pass
     elif backend_results.get("error_type") == "slot_occupied":
-        reply_text = tpl.booking_slot_occupied(backend_results.get("failed_slot_label"))
+        label = backend_results.get("failed_slot_label") or "quello slot"
+        remaining = new_collected.get("last_slots") or []
+        if remaining:
+            labels = _slot_labels(remaining)
+            reply_text = (
+                f"Mi dispiace, {label} non è più disponibile.\n\n"
+                "Ecco le altre opzioni:\n"
+                + "\n".join(f"{i+1}. {lb}" for i, lb in enumerate(labels))
+                + "\n\nQuale preferisci? (numero o orario)"
+            )
+        else:
+            reply_text = (
+                f"Mi dispiace, {label} non è più disponibile. "
+                "Vuoi che cerchi altri orari?"
+            )
+        # Non chiedere il nome in questo turno
+        new_collected.pop("_remind_name_after_info", None)
     elif backend_results.get("error_type") == "slot_not_found_in_memory":
         reply_text = tpl.SLOT_NOT_FOUND_IN_MEMORY
     elif backend_results.get("error_type") == "day_choice_unclear":
@@ -1904,7 +1829,15 @@ async def process_messages(messages: list[dict]):
     elif backend_results.get("error_type") == "no_more_appointments_to_propose":
         reply_text = tpl.NO_MORE_APPOINTMENTS_TO_PROPOSE
     elif backend_results.get("error_type") == "ask_new_time_preference":
-        reply_text = tpl.ASK_NEW_TIME_PREFERENCE
+        from_label = backend_results.get("modify_from_label")
+        if from_label:
+            reply_text = (
+                f"Ok, sposto l'appuntamento di {from_label}.\n"
+                "Ha qualche preferenza per quando vorrebbe spostarlo "
+                "(giorno e/o fascia oraria)?"
+            )
+        else:
+            reply_text = tpl.ASK_NEW_TIME_PREFERENCE
     elif backend_results.get("error_type") == "technical_error":
         reply_text = tpl.TECHNICAL_ERROR
 
