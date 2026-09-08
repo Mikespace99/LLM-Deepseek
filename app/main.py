@@ -1826,6 +1826,10 @@ async def process_messages(messages: list[dict]):
         reply_text = tpl.NO_APPOINTMENT_TO_MODIFY
     elif backend_results.get("error_type") == "appointment_confirmation_needed":
         reply_text = tpl.appointment_confirmation_needed(backend_results.get("appointment_confirmation_label"))
+    elif backend_results.get("error_type") == "appointment_choice_needed":
+        reply_text = backend_results.get("appointment_choice_text") or (
+            "Hai più di un appuntamento. Indica quale vuoi spostare (numero o orario)."
+        )
     elif backend_results.get("error_type") == "no_more_appointments_to_propose":
         reply_text = tpl.NO_MORE_APPOINTMENTS_TO_PROPOSE
     elif backend_results.get("error_type") == "ask_new_time_preference":
@@ -1872,6 +1876,7 @@ async def process_messages(messages: list[dict]):
         or new_collected.get("pending_exact_time")
         or new_collected.get("modifying_appointment")
         or new_collected.get("pending_confirmation_appointment")
+        or new_collected.get("reschedule_candidates")
     )
 
     if has_live_negotiation:
