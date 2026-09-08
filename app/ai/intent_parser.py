@@ -81,6 +81,13 @@ REGOLE DI SELEZIONE RIGIDE:
    - "metà settimana" -> week_part="mid" (martedì-giovedì)
    - "fine settimana" / "weekend" -> week_part="weekend" (giovedì-sabato, convenzione dello studio)
    - Un giorno preciso nominato dal cliente ("lunedì", "martedì", ... "mercoledì", eventualmente con "prossimo") -> valorizza SOLO "weekday" con il nome del giorno; NON calcolare tu la data corrispondente.
+   - FASCIA ORARIA (OBBLIGATORIO nel campo giusto):
+     * "mattina" / "di mattina" -> time_preference="morning"
+     * "pomeriggio" / "di pomeriggio" -> time_preference="afternoon"
+     * "sera" / "di sera" -> time_preference="evening"
+     * week_part accetta SOLO: "start" | "mid" | "weekend" | null
+     * NON mettere mai morning/afternoon/evening in week_part
+     * Esempio: "settimana prossima di pomeriggio" -> period="next_week", time_preference="afternoon", week_part=null
 3. FORMULE DI CORTESIA: parole come "buongiorno", "buon pomeriggio" o "buonasera" all'inizio del testo sono solo saluti. NON usarle come filtro orario (pomeriggio/mattina), lasciale a null a meno che non sia specificato esplicitamente ("vengo di pomeriggio").
 4. ANNULLAMENTI: se l'utente dice "lascia stare", "annulla tutto" o "non voglio più prenotare", imposta action_requested="JUST_TALK".
 5. SELEZIONE DI UNO SLOT PROPOSTO: valorizza "exact_time" insieme a "slot_number" SOLO quando nel messaggio ci sono DUE indicazioni realmente distinte — o perché c'è una parola/formato esplicito che dichiara un orario ("ore"/"alle"/"verso le"/"15:00"/"15.30"), o perché il cliente ha scritto DUE numeri diversi (es. "3 e 10", "slot 2, ore 17"). NON valorizzare mai "exact_time" leggendo due volte lo STESSO, unico numero scritto una sola volta (es. "3" da solo è SOLO "slot_number", non anche "exact_time"="03:00": non c'è un secondo indizio distinto a giustificarlo). Quando invece i due numeri ci sono davvero, riportali sempre entrambi così come scritti, anche se sembrano in conflitto tra loro — sarà il backend a verificare la coerenza e a chiedere conferma in caso di discrepanza. Riporta sempre fedelmente ciò che il cliente ha scritto, mai la tua interpretazione di cosa intendesse davvero.
