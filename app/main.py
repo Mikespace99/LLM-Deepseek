@@ -41,6 +41,7 @@ from app.repositories.conversation import (
 )
 from app.repositories.customer import (
     get_or_create_customer,
+    update_customer_name,
 )
 from app.repositories.tenant import (
     get_tenant_by_whatsapp_number,
@@ -420,16 +421,40 @@ def _message_looks_like_slot_choice(text: str, max_n: int) -> bool:
 
 
 
-def _classify_awaiting_name_message(text: str) -> str:
+# Riconoscimento di conferma/diniego per PAROLA INTERA (\b...\b), non per
+# uguaglianza dell'intera frase: così "sì", "sì certo", "va bene grazie"
+# sono tutti riconosciuti come conferma, non solo la parola isolata.
+_CONFIRM_WORD_PATTERNS = (
+    r"\bs[iì]\b", r"\bok\b", r"\bconfermo\b", r"\bcerto\b", r"\besatto\b",
+    r"\bperfetto\b", r"\bgiusto\b", r"\bva\s+bene\b", r"\bd'?\s*accordo\b",
+)
+
+_DENY_WORD_PATTERNS = (
+    r"\bno\b", r"\bniente\b", r"\bmacch[eé]\b", r"\bneanche\b", r"\bnemmeno\b",
+    r"\bnon\s+va\s+bene\b",
+)
+
+# Frasi con cui le persone introducono il proprio nome, da scartare quando
+# proviamo a isolare il nome vero da una risposta tipo "Sì, mi chiamo Marco".
+_NAME_ANNOUNCE_PATTERNS = (
+    r"\bmi\s+chiamo\b", r"\bsono\b", r"\bil\s+mio\s+nome\s+[eè]\b", r"\ba\s+nome\s+di\b",
+)
+
+
+def _classify_awaiting_name_message(text: str) -> tuple[str, str | None]:
     """
     Classificazione deterministica del messaggio mentre aspettiamo il nome.
-    Ritorna: "name" | "info_question" | "cancel" | "yesno" | "doubt"
+    Ritorna (kind, extracted_name):
+      kind: "name" | "info_question" | "cancel" | "yesno" | "doubt"
+      extracted_name: valorizzato solo se kind == "name" (può differire dal
+      testo grezzo quando contiene anche una parola di conferma, es.
+      "Sì, mi chiamo Marco Rossi" → "Marco Rossi").
     """
     import re
 
     t = (text or "").strip()
     if not t:
-        return "doubt"
+        return "doubt", None
 
     low = t.lower().strip()
 
@@ -437,14 +462,7 @@ def _classify_awaiting_name_message(text: str) -> str:
     if any(p in low for p in (
         "lascia stare", "annulla", "non voglio più", "dimentica", "stop",
     )):
-        return "cancel"
-
-    # Sì/No puri
-    if low in {
-        "si", "sì", "no", "ok", "va bene", "confermo", "certo", "esatto",
-        "no grazie", "no no",
-    }:
-        return "yesno"
+        return "cancel", None
 
     # Domanda / richiesta informativa chiara
     info_markers = (
@@ -454,11 +472,34 @@ def _classify_awaiting_name_message(text: str) -> str:
         "carta", "pagare", "pagamento", "?",
     )
     if any(m in low for m in info_markers):
-        return "info_question"
+        return "info_question", None
 
     # Solo numero / scelta slot residua
     if t.isdigit() or re.fullmatch(r"il\s*\d+", low):
-        return "doubt"
+        return "doubt", None
+
+    has_confirm = any(re.search(p, low) for p in _CONFIRM_WORD_PATTERNS)
+    has_deny = any(re.search(p, low) for p in _DENY_WORD_PATTERNS)
+
+    # Il messaggio contiene una parola di conferma/diniego (da sola o dentro
+    # una frase più lunga, es. "Si certo", "va bene grazie"). PRIMA di
+    # arrenderci a "è una conferma pura", verifichiamo se dopo aver tolto
+    # quella parola resta comunque un nome vero (es. "Sì, mi chiamo Marco
+    # Rossi"): in quel caso vogliamo il nome, non solo la conferma.
+    if has_confirm or has_deny:
+        remainder = low
+        for p in _CONFIRM_WORD_PATTERNS + _DENY_WORD_PATTERNS + _NAME_ANNOUNCE_PATTERNS:
+            remainder = re.sub(p, " ", remainder)
+        remainder = re.sub(r"[,\.;:!]+", " ", remainder).strip()
+        remainder_words = remainder.split()
+
+        if 1 <= len(remainder_words) <= 4 and not any(ch.isdigit() for ch in remainder):
+            candidate_name = " ".join(w.capitalize() for w in remainder_words)
+            return "name", candidate_name
+
+        # Nessun contenuto extra utilizzabile: è una conferma/diniego pura,
+        # non un nome ("Si certo", "va bene", "no grazie"...).
+        return "yesno", None
 
     # Sembra un nome: 1–4 parole, principalmente lettere, niente ?
     words = t.split()
@@ -472,9 +513,9 @@ def _classify_awaiting_name_message(text: str) -> str:
                 " per ", "mia moglie", "mio marito", "mio figlio", "mia figlia",
                 "a nome", "intesta",
             )) and not low.startswith(("è ", "e ", "per ")):
-                return "name"
+                return "name", t
 
-    return "doubt"
+    return "doubt", None
 
 
 def _preferences_are_open(parameters: dict) -> bool:
@@ -1032,12 +1073,12 @@ async def process_messages(messages: list[dict]):
         and not new_collected.get("person_name")
         and (combined_text or "").strip()
     ):
-        _kind = _classify_awaiting_name_message(combined_text)
-        print(f"[NAME-GATE] kind={_kind}")
+        _kind, _extracted_name = _classify_awaiting_name_message(combined_text)
+        print(f"[NAME-GATE] kind={_kind} extracted={_extracted_name!r}")
 
         if _kind == "name":
             parameters = dict(parameters)
-            parameters["person_name"] = combined_text.strip()
+            parameters["person_name"] = _extracted_name or combined_text.strip()
             parameters["confirmation"] = "yes"
             parameters["slot_number"] = None
             parameters["exact_time"] = None
@@ -1549,6 +1590,20 @@ async def process_messages(messages: list[dict]):
                                 except Exception as e:
                                     print(f"[BACKEND ERROR] Nuovo appuntamento confermato, ma cancellazione del vecchio ({modifying.get('id')}) fallita: {e}")
                                     backend_results["old_appointment_cancel_failed"] = True
+
+                            # Il nome raccolto in conversazione finora viveva
+                            # solo in collected_data: non veniva mai scritto
+                            # sul cliente, quindi restava sempre assente in
+                            # Agenda/anagrafica. Lo salviamo qui, subito dopo
+                            # la conferma andata a buon fine. Non sovrascrive
+                            # un nome già presente (es. corretto manualmente
+                            # dallo staff in dashboard).
+                            _collected_name = (new_collected.get("person_name") or "").strip()
+                            if _collected_name and not (customer.get("full_name") or "").strip():
+                                try:
+                                    update_customer_name(tenant["id"], customer["id"], _collected_name)
+                                except Exception as e:
+                                    print(f"[BACKEND ERROR] Salvataggio nome cliente fallito: {e}")
 
                             new_collected = {}
                         else:
