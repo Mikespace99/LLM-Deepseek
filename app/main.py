@@ -989,71 +989,62 @@ async def process_messages(messages: list[dict]):
     new_collected = dict(collected)
 
     # --- Gestione messaggio mentre aspettiamo il nome intestatario ---
+    # PRIORITÀ: se stiamo aspettando il nome, il testo del messaggio corrente
+    # vince su person_name residuo in collected o inventato da Step1 dalla cronologia.
     _awaiting_name = bool(
         new_collected.get("awaiting_person_name")
         or (
             (new_collected.get("pending_confirmation_slot") or new_collected.get("selected_slot"))
-            and not new_collected.get("person_name")
-        )
-        or (
-            action_requested == "CONFIRM_BOOKING"
-            and not parameters.get("person_name")
-            and not new_collected.get("person_name")
-            and (
-                new_collected.get("pending_confirmation_slot")
-                or new_collected.get("selected_slot")
-                or new_collected.get("last_slots")
-            )
-            and not _message_looks_like_slot_choice(
-                combined_text, len(new_collected.get("last_slots") or []) or 3
-            )
+            and not new_collected.get("awaiting_person_name")
+            # solo se manca ancora il nome per chiudere (niente nome in collected
+            # OPPURE stiamo esplicitamente in missing_data)
         )
     )
+    # Se abbiamo slot scelto e ci è stato chiesto il nome (flag), siamo in attesa
+    if new_collected.get("awaiting_person_name"):
+        _awaiting_name = True
+    elif (
+        (new_collected.get("pending_confirmation_slot") or new_collected.get("selected_slot"))
+        and not new_collected.get("person_name")
+        and not new_collected.get("modifying_appointment")
+    ):
+        _awaiting_name = True
+
     print(
         f"[NAME-GATE] check awaiting={_awaiting_name} "
         f"flag={bool(new_collected.get('awaiting_person_name'))} "
-        f"pending={bool(new_collected.get('pending_confirmation_slot'))} "
-        f"selected={bool(new_collected.get('selected_slot'))} "
-        f"last_slots={len(new_collected.get('last_slots') or [])} "
-        f"person_name_param={parameters.get('person_name')!r} "
-        f"action={action_requested} text={combined_text!r}"
+        f"collected_name={new_collected.get('person_name')!r} "
+        f"param_name={parameters.get('person_name')!r} "
+        f"text={combined_text!r}"
     )
-    # Se Step 1 ha già estratto il nome mentre siamo in attesa: usalo e
-    # pulisci residui di scelta slot, senza rifare classificazione.
-    if (
-        _awaiting_name
-        and parameters.get("person_name")
-        and not new_collected.get("person_name")
-    ):
-        parameters = dict(parameters)
-        parameters["confirmation"] = "yes"
-        parameters["slot_number"] = None
-        parameters["exact_time"] = None
-        new_collected["person_name"] = str(parameters["person_name"]).strip()
-        new_collected["pending_slot_number"] = None
-        new_collected["pending_exact_time"] = None
-        new_collected["awaiting_person_name"] = False
-        action_requested = "CONFIRM_BOOKING"
-        print(f"[NAME] da Step1, accettato: {new_collected['person_name']!r}")
-    elif (
-        _awaiting_name
-        and not parameters.get("person_name")
-        and not new_collected.get("person_name")
-        and (combined_text or "").strip()
-    ):
+
+    if _awaiting_name and (combined_text or "").strip():
         _kind = _classify_awaiting_name_message(combined_text)
         print(f"[NAME-GATE] kind={_kind}")
 
         if _kind == "name":
-            parameters = dict(parameters)
-            parameters["person_name"] = combined_text.strip()
-            parameters["confirmation"] = "yes"
-            parameters["slot_number"] = None
-            parameters["exact_time"] = None
-            new_collected["pending_slot_number"] = None
-            new_collected["pending_exact_time"] = None
-            action_requested = "CONFIRM_BOOKING"
-            print(f"[NAME] accettato come nome: {parameters['person_name']}")
+            _name = combined_text.strip()
+            _nwords = len([w for w in _name.split() if w])
+            if _nwords < 2:
+                # Una sola parola: non sappiamo se nome o cognome
+                action_requested = "JUST_TALK"
+                new_collected["awaiting_person_name"] = True
+                new_collected["_name_incomplete"] = True
+                backend_results["error_type"] = "name_incomplete"
+                print(f"[NAME] incompleto (1 parola): {_name!r}")
+            else:
+                parameters = dict(parameters)
+                parameters["person_name"] = _name
+                parameters["confirmation"] = "yes"
+                parameters["slot_number"] = None
+                parameters["exact_time"] = None
+                new_collected["person_name"] = _name
+                new_collected["pending_slot_number"] = None
+                new_collected["pending_exact_time"] = None
+                new_collected["awaiting_person_name"] = False
+                new_collected.pop("_name_incomplete", None)
+                action_requested = "CONFIRM_BOOKING"
+                print(f"[NAME] dal messaggio corrente: {_name!r}")
 
         elif _kind == "info_question":
             action_requested = "JUST_TALK"
@@ -1065,72 +1056,85 @@ async def process_messages(messages: list[dict]):
             new_collected = {}
 
         elif _kind == "yesno":
+            # "sì" non è un nome
             action_requested = "JUST_TALK"
             new_collected["awaiting_person_name"] = True
             new_collected["_remind_name_after_info"] = True
 
         else:
-            if parameters.get("person_name"):
-                parameters = dict(parameters)
-                parameters["confirmation"] = "yes"
-                parameters["slot_number"] = None
-                action_requested = "CONFIRM_BOOKING"
+            # Dubbio: se il messaggio è corto e senza '?', usalo comunque come nome
+            _words = (combined_text or "").strip().split()
+            if (
+                1 <= len(_words) <= 5
+                and "?" not in (combined_text or "")
+                and not any(ch.isdigit() for ch in combined_text)
+                and not _message_looks_like_slot_choice(
+                    combined_text, len(new_collected.get("last_slots") or []) or 3
+                )
+            ):
+                _name = combined_text.strip()
+                if len(_words) < 2:
+                    action_requested = "JUST_TALK"
+                    new_collected["awaiting_person_name"] = True
+                    new_collected["_name_incomplete"] = True
+                    backend_results["error_type"] = "name_incomplete"
+                    print(f"[NAME] incompleto (dubbio, 1 parola): {_name!r}")
+                else:
+                    parameters = dict(parameters)
+                    parameters["person_name"] = _name
+                    parameters["confirmation"] = "yes"
+                    parameters["slot_number"] = None
+                    new_collected["person_name"] = _name
+                    new_collected["pending_slot_number"] = None
+                    new_collected["awaiting_person_name"] = False
+                    action_requested = "CONFIRM_BOOKING"
+                    print(f"[NAME] dubbio→messaggio corrente: {_name!r}")
             else:
                 try:
                     from app.ai.intent_parser import classify_name_doubt
                     doubt = classify_name_doubt(combined_text)
                     print(f"[NAME-DOUBT AI] {doubt}")
                     if doubt.get("kind") == "name" and doubt.get("person_name"):
+                        _name = str(doubt["person_name"]).strip()
                         parameters = dict(parameters)
-                        parameters["person_name"] = doubt["person_name"]
+                        parameters["person_name"] = _name
                         parameters["confirmation"] = "yes"
                         parameters["slot_number"] = None
-                        parameters["exact_time"] = None
-                        new_collected["pending_slot_number"] = None
-                        new_collected["pending_exact_time"] = None
+                        new_collected["person_name"] = _name
+                        new_collected["awaiting_person_name"] = False
                         action_requested = "CONFIRM_BOOKING"
-                        print(f"[NAME] AI dubbio → nome: {parameters['person_name']}")
+                        print(f"[NAME] AI dubbio → {_name!r}")
                     elif doubt.get("kind") == "info_question":
                         action_requested = "JUST_TALK"
                         new_collected["awaiting_person_name"] = True
                         new_collected["_remind_name_after_info"] = True
-                    elif doubt.get("kind") == "cancel":
-                        action_requested = "JUST_TALK"
-                        new_collected = {}
-                    else:
-                        # Dubbio non risolto: se sembra un nome corto, accettalo
-                        _words = (combined_text or "").strip().split()
-                        if (
-                            1 <= len(_words) <= 4
-                            and "?" not in (combined_text or "")
-                            and not any(ch.isdigit() for ch in combined_text)
-                        ):
-                            parameters = dict(parameters)
-                            parameters["person_name"] = combined_text.strip()
-                            parameters["confirmation"] = "yes"
-                            parameters["slot_number"] = None
-                            new_collected["pending_slot_number"] = None
-                            action_requested = "CONFIRM_BOOKING"
-                            print(f"[NAME] dubbio→accetto comunque: {parameters['person_name']}")
-                        else:
-                            action_requested = "JUST_TALK"
-                            new_collected["awaiting_person_name"] = True
-                            new_collected["_remind_name_after_info"] = True
-                except Exception as e:
-                    print(f"[NAME-DOUBT] fallback: {e}")
-                    _words = (combined_text or "").strip().split()
-                    if 1 <= len(_words) <= 4 and "?" not in (combined_text or ""):
-                        parameters = dict(parameters)
-                        parameters["person_name"] = combined_text.strip()
-                        parameters["confirmation"] = "yes"
-                        parameters["slot_number"] = None
-                        new_collected["pending_slot_number"] = None
-                        action_requested = "CONFIRM_BOOKING"
-                        print(f"[NAME] fallback permissivo: {parameters['person_name']}")
                     else:
                         action_requested = "JUST_TALK"
                         new_collected["awaiting_person_name"] = True
                         new_collected["_remind_name_after_info"] = True
+                except Exception as e:
+                    print(f"[NAME-DOUBT] err: {e}")
+                    action_requested = "JUST_TALK"
+                    new_collected["awaiting_person_name"] = True
+                    new_collected["_remind_name_after_info"] = True
+
+    # Se NON siamo in attesa nome, ignora person_name "fantasma" da Step1
+    # preso dalla cronologia (altro intestatario) su un turno di sola scelta slot.
+    elif (
+        not _awaiting_name
+        and parameters.get("person_name")
+        and not new_collected.get("awaiting_person_name")
+        and (new_collected.get("last_slots") or new_collected.get("pending_confirmation_slot"))
+        and parameters.get("person_name") != (combined_text or "").strip()
+        and not new_collected.get("person_name")
+    ):
+        # non inquinare: lascia person_name solo se il messaggio lo contiene
+        _pn = str(parameters.get("person_name") or "").lower()
+        _tx = (combined_text or "").lower()
+        if _pn and _pn not in _tx and not any(w in _tx for w in _pn.split() if len(w) > 2):
+            print(f"[NAME] scarto person_name da Step1 non nel messaggio: {parameters.get('person_name')!r}")
+            parameters = dict(parameters)
+            parameters["person_name"] = None
 
     # --- Gate deterministico: scelta slot su last_slots ---
     # Se abbiamo appena mostrato un menu e il messaggio è un numero/orario,
@@ -1219,6 +1223,9 @@ async def process_messages(messages: list[dict]):
         "confirmed_slot_label": None,
         "failed_slot_label": None,
     }
+    if new_collected.get("_name_incomplete"):
+        backend_results["error_type"] = "name_incomplete"
+        new_collected.pop("_name_incomplete", None)
     slots_text_to_append = ""
 
     # ------------------------------------------------------------
@@ -1711,6 +1718,13 @@ async def process_messages(messages: list[dict]):
         )
         or backend_results.get("error_type") == "technical_error"
         or backend_results.get("error_type") == "slot_choice_confirm"
+        or backend_results.get("error_type") in (
+            "name_incomplete",
+            "missing_data",
+            "ask_new_time_preference",
+            "appointment_choice_needed",
+            "appointment_confirmation_needed",
+        )
     )
 
     if skip_ai_response:
@@ -1792,6 +1806,21 @@ async def process_messages(messages: list[dict]):
         reply_text = f"Confermi quindi di aver scelto lo slot n.{n} alle ore {t}?"
     elif backend_results.get("error_type") == "slot_time_mismatch":
         reply_text = tpl.slot_time_mismatch(backend_results.get("mismatch_slot_label"))
+    elif backend_results.get("error_type") == "name_incomplete":
+        _lab = None
+        _ps = new_collected.get("pending_confirmation_slot") or new_collected.get("selected_slot")
+        if _ps:
+            try:
+                _lab = _slot_labels([_ps])[0]
+            except Exception:
+                _lab = None
+        if hasattr(tpl, "booking_name_incomplete"):
+            reply_text = tpl.booking_name_incomplete(_lab)
+        else:
+            reply_text = (
+                "Mi servono nome e cognome dell'intestatario (entrambi). "
+                "Me li può scrivere per intero?"
+            )
     elif backend_results.get("error_type") == "missing_data":
         reply_text = tpl.booking_missing_name(backend_results.get("failed_slot_label"))
         new_collected["awaiting_person_name"] = True
