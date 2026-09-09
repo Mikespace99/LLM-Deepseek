@@ -1,0 +1,432 @@
+{% extends "base_dashboard.html" %}
+{% block title %}Agenda – AI Booking{% endblock %}
+{% block mobile_title %}Agenda{% endblock %}
+
+{% block extra_head %}
+  <link href="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.11/index.global.min.css" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.11/index.global.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.11/locales/it.global.min.js"></script>
+  <style>
+    .fc { --fc-border-color: #e5e7eb; --fc-today-bg-color: #f0f9ff; font-size: 0.8125rem; }
+    .fc .fc-toolbar.fc-header-toolbar { display: none; }
+    .fc-event.ev-whatsapp { background: #0284c7; border-color: #0284c7; }
+    .fc-event.ev-manual   { background: #16a34a; border-color: #16a34a; }
+    .fc-event.ev-block    { background: #9ca3af; border-color: #9ca3af; }
+    .fc-event.ev-cancelled{ opacity: .45; text-decoration: line-through; }
+    @media (max-width: 767px) {
+      .fc-timegrid-slot-label { font-size: 0.7rem; }
+    }
+  </style>
+{% endblock %}
+
+{% block content %}
+<div x-data="agendaApp()" x-init="init()">
+
+  <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+    <div>
+      <h1 class="text-xl font-bold text-gray-900">Agenda</h1>
+      <p class="text-sm text-gray-500" x-text="rangeLabel"></p>
+    </div>
+    <button @click="openCreateModal(null)"
+            class="hidden md:flex items-center gap-2 px-4 py-2 rounded-lg bg-brand-600 text-white text-sm font-medium hover:bg-brand-700">
+      + Nuovo Appuntamento
+    </button>
+  </div>
+
+  <div class="bg-white rounded-2xl shadow-sm border border-gray-200 p-3 sm:p-4">
+
+    <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+      <div class="flex items-center gap-2">
+        <button @click="calendar.prev()" class="p-2 rounded-lg border border-gray-200 hover:bg-gray-50">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
+        </button>
+        <button @click="calendar.next()" class="p-2 rounded-lg border border-gray-200 hover:bg-gray-50">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
+        </button>
+        <button @click="calendar.today()" class="px-3 py-2 rounded-lg border border-gray-200 text-sm hover:bg-gray-50">Oggi</button>
+      </div>
+
+      <div class="flex items-center gap-2">
+        <div class="flex rounded-lg border border-gray-200 overflow-hidden text-sm">
+          <button @click="changeView('timeGridDay')" :class="viewName==='timeGridDay' ? 'bg-brand-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'" class="px-3 py-2">Giorno</button>
+          <button @click="changeView('timeGridWeek')" :class="viewName==='timeGridWeek' ? 'bg-brand-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'" class="px-3 py-2 border-l border-gray-200">Settimana</button>
+          <button @click="changeView('dayGridMonth')" :class="viewName==='dayGridMonth' ? 'bg-brand-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'" class="px-3 py-2 border-l border-gray-200">Mese</button>
+        </div>
+        <select x-model="filters.location_id" @change="refetch()"
+                x-show="locations.length > 1"
+                class="rounded-lg border border-gray-300 px-3 py-2 text-sm">
+          <option value="">Tutte le sedi</option>
+          <template x-for="loc in locations" :key="loc.id">
+            <option :value="loc.id" x-text="loc.name"></option>
+          </template>
+        </select>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-4 mb-4 text-xs text-gray-500">
+      <span class="flex items-center gap-1"><span class="w-3 h-3 rounded bg-brand-600 inline-block"></span> Da WhatsApp</span>
+      <span class="flex items-center gap-1"><span class="w-3 h-3 rounded bg-green-600 inline-block"></span> Creato da staff</span>
+      <span class="flex items-center gap-1"><span class="w-3 h-3 rounded bg-gray-400 inline-block"></span> Bloccato</span>
+    </div>
+
+    <div id="calendar"></div>
+  </div>
+
+  <button @click="openCreateModal(null)"
+          class="md:hidden fixed bottom-5 right-5 z-30 w-14 h-14 rounded-full bg-brand-600 text-white shadow-lg flex items-center justify-center">
+    <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+  </button>
+
+  <div x-show="toast" x-cloak
+       class="fixed top-4 right-4 z-50 px-4 py-3 rounded-lg shadow-lg text-sm font-medium"
+       :class="toastOk ? 'bg-green-600 text-white' : 'bg-red-600 text-white'"
+       x-text="toast"></div>
+
+  <div x-show="modal.open && modal.mode === 'create'" x-cloak
+       class="fixed inset-0 bg-black/40 z-40 flex items-center justify-center p-4" @click.self="closeModal()">
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-md p-6 max-h-[90vh] overflow-y-auto" @click.stop>
+      <h2 class="text-lg font-bold mb-4">Nuovo appuntamento</h2>
+
+      <div class="flex gap-2 mb-4">
+        <button @click="form.type = 'booking'"
+                :class="form.type === 'booking' ? 'bg-brand-600 text-white' : 'bg-gray-100 text-gray-600'"
+                class="flex-1 py-2 rounded-lg text-sm font-medium">Prenotazione</button>
+        <button @click="form.type = 'block'"
+                :class="form.type === 'block' ? 'bg-brand-600 text-white' : 'bg-gray-100 text-gray-600'"
+                class="flex-1 py-2 rounded-lg text-sm font-medium">Blocca orario</button>
+      </div>
+
+      <template x-if="form.type === 'booking'">
+        <div class="space-y-3 mb-3">
+          <div class="relative">
+            <label class="block text-xs font-medium text-gray-600 mb-1">Cliente</label>
+            <input type="text" x-model="form.customer_query" @input="searchCustomers()"
+                   placeholder="Cerca per nome o numero…"
+                   class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm">
+            <div x-show="customerResults.length" x-cloak
+                 class="absolute z-10 bg-white border border-gray-200 rounded-lg shadow-lg w-full mt-1 max-h-40 overflow-auto">
+              <template x-for="c in customerResults" :key="c.id">
+                <button type="button" @click="pickCustomer(c)"
+                        class="block w-full text-left px-3 py-2 text-sm hover:bg-gray-50">
+                  <span x-text="c.full_name || 'Senza nome'"></span>
+                  <span class="text-gray-400" x-text="' · ' + c.phone_number"></span>
+                </button>
+              </template>
+            </div>
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Nome</label>
+              <input type="text" x-model="form.customer_name" class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm">
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Telefono</label>
+              <input type="text" x-model="form.customer_phone" class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm">
+            </div>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Servizio</label>
+            <select x-model="form.service_id" @change="loadSuggestedSlots()"
+                    class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm">
+              <option value="">Seleziona…</option>
+              <template x-for="s in services" :key="s.id">
+                <option :value="s.id" x-text="s.name + ' (' + s.duration_minutes + ' min)'"></option>
+              </template>
+            </select>
+          </div>
+        </div>
+      </template>
+
+      <div class="grid grid-cols-2 gap-3 mb-3">
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Data</label>
+          <input type="date" x-model="form.date" @change="loadSuggestedSlots()"
+                 class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Ora</label>
+          <input type="time" x-model="form.time" class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm">
+        </div>
+      </div>
+
+      <div x-show="form.type === 'block'" class="mb-3">
+        <label class="block text-xs font-medium text-gray-600 mb-1">Durata (minuti)</label>
+        <input type="number" x-model.number="form.duration_minutes" min="5" step="5"
+               class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm">
+      </div>
+
+      <div x-show="form.type === 'booking' && suggestedSlots.length" x-cloak class="mb-3">
+        <div class="text-xs font-medium text-gray-600 mb-1">Slot liberi suggeriti</div>
+        <div class="flex flex-wrap gap-2">
+          <template x-for="slot in suggestedSlots" :key="slot.datetime">
+            <button type="button" @click="form.time = slot.time"
+                    class="px-2 py-1 rounded-md border border-gray-300 text-xs hover:border-brand-500 hover:text-brand-700"
+                    x-text="slot.time"></button>
+          </template>
+        </div>
+      </div>
+
+      <div class="mb-4">
+        <label class="block text-xs font-medium text-gray-600 mb-1">Note</label>
+        <textarea x-model="form.notes" rows="2" class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"></textarea>
+      </div>
+
+      <div class="flex justify-end gap-2">
+        <button @click="closeModal()" class="px-4 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-100">Annulla</button>
+        <button @click="submitCreate()" :disabled="saving"
+                class="px-4 py-2 rounded-lg bg-brand-600 text-white text-sm font-medium hover:bg-brand-700 disabled:opacity-50">
+          <span x-text="saving ? 'Salvataggio…' : 'Salva'"></span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div x-show="modal.open && modal.mode === 'detail'" x-cloak
+       class="fixed inset-0 bg-black/40 z-40 flex items-center justify-center p-4" @click.self="closeModal()">
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-md p-6" @click.stop x-show="modal.event">
+      <div class="flex items-start justify-between mb-4">
+        <h2 class="text-lg font-bold" x-text="modal.event?.title"></h2>
+        <span class="text-xs px-2 py-1 rounded-full"
+              :class="modal.event?.extendedProps?.status === 'cancelled' ? 'bg-gray-100 text-gray-500' : 'bg-brand-50 text-brand-700'"
+              x-text="modal.event?.extendedProps?.status"></span>
+      </div>
+      <div class="space-y-2 text-sm text-gray-700 mb-5">
+        <div x-show="modal.event?.extendedProps?.customer_phone">
+          <span class="text-gray-400">Telefono:</span> <span x-text="modal.event?.extendedProps?.customer_phone"></span>
+        </div>
+        <div x-show="modal.event?.extendedProps?.service_name">
+          <span class="text-gray-400">Servizio:</span> <span x-text="modal.event?.extendedProps?.service_name"></span>
+        </div>
+        <div x-show="modal.event?.extendedProps?.location_name">
+          <span class="text-gray-400">Sede:</span> <span x-text="modal.event?.extendedProps?.location_name"></span>
+        </div>
+        <div>
+          <span class="text-gray-400">Orario:</span>
+          <span x-text="fmtRange(modal.event?.start, modal.event?.end)"></span>
+        </div>
+        <div x-show="modal.event?.extendedProps?.notes">
+          <span class="text-gray-400">Note:</span> <span x-text="modal.event?.extendedProps?.notes"></span>
+        </div>
+      </div>
+
+      <div class="flex flex-wrap justify-end gap-2">
+        <template x-if="modal.event?.extendedProps?.status === 'confirmed'">
+          <div class="flex gap-2">
+            <button @click="setStatus('completed')" class="px-3 py-2 rounded-lg text-xs font-medium bg-green-50 text-green-700 hover:bg-green-100">Completato</button>
+            <button @click="setStatus('no_show')" class="px-3 py-2 rounded-lg text-xs font-medium bg-amber-50 text-amber-700 hover:bg-amber-100">No-show</button>
+            <button @click="cancelEvent()" class="px-3 py-2 rounded-lg text-xs font-medium bg-red-50 text-red-700 hover:bg-red-100">Cancella</button>
+          </div>
+        </template>
+        <button @click="closeModal()" class="px-4 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-100">Chiudi</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block page_scripts %}
+<script>
+  function agendaApp() {
+    return {
+      calendar: null,
+      viewName: 'timeGridWeek',
+      rangeLabel: '',
+      locations: [],
+      services: [],
+      filters: { location_id: '' },
+      toast: '', toastOk: true, saving: false,
+      modal: { open: false, mode: 'create', event: null },
+      form: { type: 'booking', date: '', time: '', duration_minutes: 30,
+              customer_id: null, customer_name: '', customer_phone: '',
+              customer_query: '', service_id: '', notes: '' },
+      customerResults: [],
+      suggestedSlots: [],
+
+      async init() {
+        const cfg = await fetch('/api/config').then(r => r.json()).catch(() => ({}));
+        this.locations = (cfg.locations || []).filter(l => l.active !== false);
+        this.services = (cfg.services || []).filter(s => s.active !== false);
+
+        if (window.innerWidth < 768) this.viewName = 'timeGridDay';
+
+        const calEl = document.getElementById('calendar');
+        this.calendar = new FullCalendar.Calendar(calEl, {
+          locale: 'it',
+          height: 'auto',
+          initialView: this.viewName,
+          slotMinTime: '07:00:00',
+          slotMaxTime: '21:00:00',
+          nowIndicator: true,
+          selectable: true,
+          editable: true,
+          eventClassNames: (arg) => {
+            const p = arg.event.extendedProps;
+            const cls = ['ev-' + (p.type === 'block' ? 'block' : p.source)];
+            if (p.status === 'cancelled') cls.push('ev-cancelled');
+            return cls;
+          },
+          datesSet: (info) => {
+            this.rangeLabel = info.view.title;
+            this.fetchEvents(info.startStr, info.endStr);
+          },
+          select: (info) => this.openCreateModal(info),
+          eventClick: (info) => this.openDetailModal(info.event),
+          eventDrop: (info) => this.moveEvent(info),
+        });
+        this.calendar.render();
+      },
+
+      changeView(name) {
+        this.viewName = name;
+        this.calendar.changeView(name);
+      },
+
+      async fetchEvents(fromISO, toISO) {
+        const from = fromISO.slice(0, 10);
+        const to = toISO.slice(0, 10);
+        const qs = new URLSearchParams({ date_from: from, date_to: to });
+        if (this.filters.location_id) qs.set('location_id', this.filters.location_id);
+        const events = await fetch('/api/agenda/events?' + qs).then(r => r.json()).catch(() => []);
+        this.calendar.removeAllEvents();
+        events.forEach(e => this.calendar.addEvent(e));
+      },
+
+      refetch() {
+        const view = this.calendar.view;
+        this.fetchEvents(view.activeStart.toISOString(), view.activeEnd.toISOString());
+      },
+
+      openCreateModal(selectInfo) {
+        this.form = { type: 'booking', date: '', time: '', duration_minutes: 30,
+                      customer_id: null, customer_name: '', customer_phone: '',
+                      customer_query: '', service_id: '', notes: '' };
+        this.customerResults = [];
+        this.suggestedSlots = [];
+        if (selectInfo) {
+          this.form.date = selectInfo.startStr.slice(0, 10);
+          this.form.time = selectInfo.startStr.slice(11, 16);
+          this.calendar.unselect();
+        } else {
+          const today = new Date();
+          this.form.date = today.toISOString().slice(0, 10);
+        }
+        this.modal = { open: true, mode: 'create', event: null };
+      },
+
+      openDetailModal(event) {
+        this.modal = { open: true, mode: 'detail', event: {
+          id: event.id, title: event.title,
+          start: event.start, end: event.end,
+          extendedProps: event.extendedProps,
+        }};
+      },
+
+      closeModal() { this.modal.open = false; },
+
+      async searchCustomers() {
+        const q = this.form.customer_query.trim();
+        if (q.length < 2) { this.customerResults = []; return; }
+        this.customerResults = await fetch('/api/agenda/customers/search?q=' + encodeURIComponent(q))
+          .then(r => r.json()).catch(() => []);
+      },
+
+      pickCustomer(c) {
+        this.form.customer_id = c.id;
+        this.form.customer_name = c.full_name || '';
+        this.form.customer_phone = c.phone_number || '';
+        this.form.customer_query = c.full_name || c.phone_number;
+        this.customerResults = [];
+      },
+
+      async loadSuggestedSlots() {
+        this.suggestedSlots = [];
+        if (this.form.type !== 'booking' || !this.form.date) return;
+        const qs = new URLSearchParams({ date: this.form.date });
+        if (this.form.service_id) qs.set('service_id', this.form.service_id);
+        if (this.filters.location_id) qs.set('location_id', this.filters.location_id);
+        const res = await fetch('/api/agenda/availability?' + qs).then(r => r.json()).catch(() => null);
+        this.suggestedSlots = (res && res.candidate_slots) || [];
+      },
+
+      async submitCreate() {
+        if (!this.form.date || !this.form.time) {
+          this.showToast('Data e ora sono obbligatorie', false); return;
+        }
+        if (this.form.type === 'booking' && !this.form.customer_phone) {
+          this.showToast('Inserisci almeno il telefono del cliente', false); return;
+        }
+        this.saving = true;
+        const body = {
+          type: this.form.type,
+          location_id: this.filters.location_id || null,
+          service_id: this.form.type === 'booking' ? (this.form.service_id || null) : null,
+          customer_id: this.form.customer_id,
+          customer_name: this.form.customer_name || null,
+          customer_phone: this.form.customer_phone || null,
+          date: this.form.date,
+          time: this.form.time,
+          duration_minutes: this.form.type === 'block' ? this.form.duration_minutes : null,
+          notes: this.form.notes || null,
+        };
+        const res = await fetch('/api/agenda/appointments', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+        });
+        this.saving = false;
+        if (res.status === 409) { this.showToast('Slot già occupato, scegline un altro', false); return; }
+        if (!res.ok) { this.showToast('Errore nel salvataggio', false); return; }
+        const event = await res.json();
+        this.calendar.addEvent(event);
+        this.closeModal();
+        this.showToast('Salvato', true);
+      },
+
+      async moveEvent(info) {
+        const id = info.event.id;
+        const date = info.event.startStr.slice(0, 10);
+        const time = info.event.startStr.slice(11, 16);
+        const res = await fetch('/api/agenda/appointments/' + id, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ date, time })
+        });
+        if (!res.ok) { info.revert(); this.showToast('Impossibile spostare: slot occupato', false); return; }
+        this.showToast('Spostato', true);
+      },
+
+      async setStatus(status) {
+        const id = this.modal.event.id;
+        const res = await fetch('/api/agenda/appointments/' + id, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status })
+        });
+        if (!res.ok) { this.showToast('Errore aggiornamento stato', false); return; }
+        this.closeModal();
+        this.refetch();
+        this.showToast('Aggiornato', true);
+      },
+
+      async cancelEvent() {
+        const id = this.modal.event.id;
+        const res = await fetch('/api/agenda/appointments/' + id, { method: 'DELETE' });
+        if (!res.ok) { this.showToast('Errore cancellazione', false); return; }
+        this.closeModal();
+        this.refetch();
+        this.showToast('Appuntamento cancellato', true);
+      },
+
+      fmtRange(start, end) {
+        if (!start) return '';
+        const s = new Date(start), e = new Date(end);
+        const opts = { hour: '2-digit', minute: '2-digit' };
+        const day = s.toLocaleDateString('it-IT', { day: '2-digit', month: 'long', year: 'numeric' });
+        return `${day}, ${s.toLocaleTimeString('it-IT', opts)}–${e.toLocaleTimeString('it-IT', opts)}`;
+      },
+
+      showToast(msg, ok) {
+        this.toast = msg; this.toastOk = ok;
+        setTimeout(() => { this.toast = ''; }, 3000);
+      },
+    };
+  }
+</script>
+{% endblock %}
