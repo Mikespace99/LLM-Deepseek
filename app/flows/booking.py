@@ -101,8 +101,16 @@ def confirm_booking(
     if offered is None:
         return context, SystemResult(success=False, error_code="NO_SLOT_SELECTED")
 
+    if not (context.customer.full_name.value or "").strip():
+        # Non dovrebbe succedere (il Router arriva qui solo dopo
+        # COLLECTING_CUSTOMER_DATA), ma se succede è meglio un errore
+        # chiaro che un tentativo di creazione destinato a fallire.
+        context.conversation.current_step = ConversationStep.COLLECTING_CUSTOMER_DATA
+        return context, SystemResult(success=False, error_code="MISSING_CUSTOMER_NAME")
+
     collected_data = build_search_collected_data(context)
     collected_data["selected_slot"] = offered_slot_to_engine_dict(offered)
+    collected_data["person_name"] = context.customer.full_name.value
 
     context.conversation.current_step = ConversationStep.EXECUTING
 
