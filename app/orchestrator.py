@@ -53,7 +53,13 @@ def handle_message(
         response_type = ResponseType.ASK_CLARIFICATION
 
     # 5. AI#2: scrive il messaggio finale
-    history_text = "\n".join(f"{m.role}: {m.text}" for m in context.memory.recent_messages[-6:])
+    # Solo i messaggi dell'UTENTE, mai le risposte precedenti del bot:
+    # quelle potevano contenere liste di slot scritte in un turno precedente,
+    # con il rischio che AI#2 le "riciclasse" invece di scrivere un testo
+    # nuovo e corretto.
+    history_text = "\n".join(
+        m.text for m in context.memory.recent_messages[-6:] if m.role == "user"
+    )
     ai2 = run_ai2_responder(
         response_type=response_type,
         system_result=system_result,
