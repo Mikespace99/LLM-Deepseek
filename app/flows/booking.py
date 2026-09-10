@@ -18,7 +18,7 @@ Ogni funzione qui dentro:
 from __future__ import annotations
 
 from app.booking import engine
-from app.context.models import ConversationContext, ConversationStep, SystemResult
+from app.context.models import ConversationContext, ConversationStep, PendingAction, SystemResult
 from app.flows.common import (
     advance_after_customer_data,
     advance_after_slot_selection,
@@ -66,7 +66,7 @@ def start_search(
 
     context.offered_slots = slots_to_offered(candidate_slots)
     context.conversation.current_step = ConversationStep.WAITING_FOR_SLOT
-    context.conversation.pending_action = None
+    context.conversation.pending_action = PendingAction.NONE
 
     return context, SystemResult(
         success=True,
@@ -127,7 +127,7 @@ def confirm_booking(
     context.booking.id = result.get("appointment_id")
     context.booking.status = context.booking.status.__class__.CONFIRMED
     context.conversation.current_step = ConversationStep.COMPLETED
-    context.conversation.pending_action = None
+    context.conversation.pending_action = PendingAction.NONE
     context.confirmation.required = False
 
     return context, SystemResult(success=True, data={"appointment_id": context.booking.id})
@@ -140,5 +140,5 @@ def reject_confirmation(context: ConversationContext, **_ignored) -> tuple[Conve
     context.confirmation.required = False
     context.confirmation.status = None
     context.conversation.current_step = ConversationStep.WAITING_FOR_SLOT
-    context.conversation.pending_action = None
+    context.conversation.pending_action = PendingAction.NONE
     return context, SystemResult(success=True, data={"next": "reask_slot"})
