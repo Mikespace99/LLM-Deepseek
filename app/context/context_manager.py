@@ -30,9 +30,11 @@ from app.context.models import (
     ConversationStatus,
     Intent,
     Message,
+    OfferedDay,
     OfferedSlot,
     OperationType,
 )
+from app.context.day_matcher import match_offered_day
 from app.context.search_resolver import resolve_search_criteria
 from app.context.slot_matcher import match_offered_slot
 
@@ -103,6 +105,21 @@ def _apply_slot_selection(context: ConversationContext, matched: OfferedSlot) ->
     context.confirmation.status = None
 
 
+def _apply_day_selection(context: ConversationContext, matched: OfferedDay) -> None:
+    """
+    Ancora la ricerca ESATTAMENTE al giorno scelto dalla panoramica,
+    invece di lasciare che venga ri-derivato da zero (es. "venerdì" da
+    solo, senza sapere più "di quale settimana"). I giorni mostrati
+    sono la fonte di verità: una volta usati, si scartano.
+    """
+    context.search.date_from = matched.date
+    context.search.date_to = matched.date
+    context.search.period = None
+    context.search.week_part = None
+    context.search.preferred_weekday = None
+    context.offered_days = []
+
+
 def _apply_confirmation(context: ConversationContext, intent: Intent) -> None:
     if intent == Intent.CONFIRM:
         context.confirmation.status = "confirmed"
@@ -143,8 +160,21 @@ def apply_ai1_result(
     # un match sui dati è un segnale più forte della sola classificazione.
     matched_slot = match_offered_slot(ai1.entities, context.offered_slots, message_text)
 
-    effective_intent = Intent.SELECT_SLOT if matched_slot else ai1.intent
-    effective_needs_clarification = ai1.needs_clarification and matched_slot is None
+    # Stesso principio, per i GIORNI mostrati nella panoramica settimanale
+    # (solo se non abbiamo già trovato uno slot - i due casi non si
+    # sovrappongono mai nella pratica, ma per chiarezza sono esclusivi).
+    matched_day = None
+    if not matched_slot and context.offered_days:
+        matched_day = match_offered_day(ai1.entities, context.offered_days, now.date())
+
+    if matched_slot:
+        effective_intent = Intent.SELECT_SLOT
+    elif matched_day:
+        effective_intent = Intent.CHANGE_PREFERENCE
+    else:
+        effective_intent = ai1.intent
+
+    effective_needs_clarification = ai1.needs_clarification and not matched_slot and not matched_day
 
     context.conversation.current_intent = effective_intent
 
@@ -162,10 +192,12 @@ def apply_ai1_result(
 
     if matched_slot:
         _apply_slot_selection(context, matched_slot)
+    elif matched_day:
+        _apply_day_selection(context, matched_day)
 
     _apply_confirmation(context, effective_intent)
 
-    if effective_intent in _SEARCH_RELEVANT_INTENTS and _has_search_signal(ai1.entities):
+    if not matched_day and effective_intent in _SEARCH_RELEVANT_INTENTS and _has_search_signal(ai1.entities):
         context.search = resolve_search_criteria(
             entities=ai1.entities,
             current=context.search,
