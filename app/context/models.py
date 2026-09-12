@@ -205,6 +205,12 @@ class OfferedSlot(BaseModel):
     slot: AvailableSlot
 
 
+class OfferedDay(BaseModel):
+    option: int
+    date: date
+    label: str
+
+
 class Operation(BaseModel):
     type: OperationType = OperationType.NONE
     status: str | None = None
@@ -275,6 +281,7 @@ class ConversationContext(BaseModel):
     search: SearchCriteria = Field(default_factory=SearchCriteria)
 
     offered_slots: list[OfferedSlot] = Field(default_factory=list)
+    offered_days: list[OfferedDay] = Field(default_factory=list)
 
     operation: Operation = Field(default_factory=Operation)
 
