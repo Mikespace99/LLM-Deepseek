@@ -25,10 +25,10 @@ from app.ai.format_helpers import build_offered_slots_rows, format_appointment_t
 from app.ai.interpreter import run_ai1_interpreter
 from app.ai.responder import compose_final_message, run_ai2_responder
 from app.ai.response_type_resolver import resolve_response_type
-from app.context.context_manager import apply_ai1_result
+from app.context.context_manager import update_context_from_message
 from app.context.models import ConversationContext, Intent, Message, ResponseType, SystemResult
 from app.router.intent_router import route
-from app.utils.it_dates import today_in_tz
+from app.utils.it_dates import ITALIAN_WEEKDAYS, today_in_tz
 
 # Intent che non richiedono alcuna business logic / accesso al DB:
 # saltano il Router e vanno dritti alla risposta.
@@ -52,18 +52,18 @@ class OutgoingMessage:
     list_rows: list[dict] = field(default_factory=list)
 
 
-def handle_message(
+async def handle_message(
     context: ConversationContext,
     message_text: str,
     tenant: dict,
     knowledge: dict,
     knowledge_texts: dict | None = None,
 ) -> tuple[ConversationContext, OutgoingMessage]:
-    # 1. AI#1: interpreta (solo il blocco minimo, non l'intero context)
-    ai1 = run_ai1_interpreter(message_text, build_ai1_input(context), tenant.get("timezone"))
+    # 1. Controlli deterministici Python integrati nel Context Manager (aggiorna lo stato)
+    context = await update_context_from_message(message_text, context)
 
-    # 2. Context Manager: aggiorna lo stato
-    context = apply_ai1_result(context, ai1, message_text)
+    # 2. AI#1: interpreta (solo se lo stato non è già stato risolto deterministicamente)
+    ai1 = run_ai1_interpreter(message_text, build_ai1_input(context), tenant.get("timezone"))
 
     # 3. Router: decide ed esegue la business logic (skip per le chiacchiere)
     if ai1.needs_clarification:
@@ -111,14 +111,31 @@ def handle_message(
         )
 
         if response_type == ResponseType.SHOW_AVAILABILITY and context.offered_slots:
-            # Lista interattiva: il testo dell'AI resta solo l'introduzione,
-            # gli orari li mostriamo come righe scelte dall'utente col dito,
-            # non più come lista scritta (né dall'AI né in chiaro).
-            outgoing = OutgoingMessage(
-                texts=[ai2.message],
-                list_button_label="Scegli orario",
-                list_rows=build_offered_slots_rows(context.offered_slots),
-            )
+            # FIX PUNTO 2: Switch condizionale Bottoni vs Liste basato sulla quantità degli slot
+            if len(context.offered_slots) <= 3:
+                # Se gli slot sono 3 o meno, usiamo i BOTTONI INTERATTIVI IMMEDIATI
+                inline_buttons = []
+                for offered in context.offered_slots:
+                    d = offered.slot.date
+                    weekday = ITALIAN_WEEKDAYS[d.isoweekday() % 7].capitalize()
+                    time_str = offered.slot.time.strftime("%H:%M")
+                    
+                    # Genera la tupla (button_id, button_text) richiesta da OutgoingMessage
+                    btn_id = f"slot_{offered.option}"
+                    btn_label = f"{weekday} {time_str}"
+                    inline_buttons.append((btn_id, btn_label))
+                
+                outgoing = OutgoingMessage(
+                    texts=[ai2.message],
+                    buttons=inline_buttons
+                )
+            else:
+                # Se gli slot sono più di 3, usiamo la LISTA A COMPARSA standard (massimo 10 righe)
+                outgoing = OutgoingMessage(
+                    texts=[ai2.message],
+                    list_button_label="Scegli orario",
+                    list_rows=build_offered_slots_rows(context.offered_slots),
+                )
         elif response_type in _YES_NO_RESPONSE_TYPES:
             outgoing = OutgoingMessage(texts=[ai2.message], buttons=yes_no_buttons())
         else:
