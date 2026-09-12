@@ -1,7 +1,7 @@
 from __future__ import annotations
 import datetime
 from app.context.models import ConversationContext, ConversationStep, PendingAction, BookingStatus
-from app.supabase_client import supabase  # Assumendo la configurazione del tuo client
+from app.supabase_client import supabase_client  # FIX: Importato il nome reale corretto dal tuo modulo
 
 async def process_booking_step(context: ConversationContext, message_text: str) -> ConversationContext:
     """
@@ -22,10 +22,9 @@ async def process_booking_step(context: ConversationContext, message_text: str) 
         start_date = search_params.date_from or datetime.date.today()
         end_date = search_params.date_to or (start_date + datetime.timedelta(days=7))
 
-        # 2. Query al database (Supabase) per estrarre gli slot liberi
-        # Nota: Sostituisci o adatta la query con i campi esatti delle tue tabelle
+        # 2. Query al database tramite il client reale 'supabase_client'
         try:
-            response = supabase.table("slots")\
+            response = supabase_client.table("slots")\
                 .select("id, date, time")\
                 .eq("status", "AVAILABLE")\
                 .gte("date", start_date.isoformat())\
@@ -37,11 +36,8 @@ async def process_booking_step(context: ConversationContext, message_text: str) 
             raw_slots = []
             context.memory.important_events.append(f"Errore query slots: {str(e)}")
 
-        # 3. ------------------------------------------------------------------
-        # FIX PUNTO 3 (Parte A): Salvataggio Deterministico dei Giorni Mostrati
-        # ------------------------------------------------------------------
+        # 3. FIX PUNTO 3 (Parte A): Salvataggio Deterministico dei Giorni Mostrati
         # Estraiamo tutte le date uniche degli slot trovati e le salviamo nel contesto
-        # in formato stringa ISO ('YYYY-MM-DD')
         if raw_slots:
             unique_days = sorted(list(set([slot["date"] for slot in raw_slots])))
             context.search.displayed_days = unique_days
