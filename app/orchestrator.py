@@ -25,10 +25,10 @@ from app.ai.format_helpers import build_offered_slots_rows, format_appointment_t
 from app.ai.interpreter import run_ai1_interpreter
 from app.ai.responder import compose_final_message, run_ai2_responder
 from app.ai.response_type_resolver import resolve_response_type
-from app.context.context_manager import apply_ai1_result, update_context_from_message
+from app.context.context_manager import apply_ai1_result
 from app.context.models import ConversationContext, Intent, Message, ResponseType, SystemResult
 from app.router.intent_router import route
-from app.utils.it_dates import ITALIAN_WEEKDAYS, today_in_tz
+from app.utils.it_dates import today_in_tz
 
 # Intent che non richiedono alcuna business logic / accesso al DB:
 # saltano il Router e vanno dritti alla risposta.
@@ -59,14 +59,10 @@ def handle_message(
     knowledge: dict,
     knowledge_texts: dict | None = None,
 ) -> tuple[ConversationContext, OutgoingMessage]:
-    
-    # FIX DETERMINISTICO PRIORITARIO: Controlla in Python se l'utente ha premuto un bottone/scelto un giorno
-    context = update_context_from_message(message_text, context)
-
     # 1. AI#1: interpreta (solo il blocco minimo, non l'intero context)
     ai1 = run_ai1_interpreter(message_text, build_ai1_input(context), tenant.get("timezone"))
 
-    # 2. Context Manager: aggiorna lo stato standard della pipeline
+    # 2. Context Manager: aggiorna lo stato
     context = apply_ai1_result(context, ai1, message_text)
 
     # 3. Router: decide ed esegue la business logic (skip per le chiacchiere)
@@ -115,27 +111,14 @@ def handle_message(
         )
 
         if response_type == ResponseType.SHOW_AVAILABILITY and context.offered_slots:
-            # FIX PUNTO 2: Se gli slot orari proposti sono 3 o meno, usa i BOTTONI RAPIDI
-            if len(context.offered_slots) <= 3:
-                inline_buttons = []
-                for offered in context.offered_slots:
-                    d = offered.slot.date
-                    weekday = ITALIAN_WEEKDAYS[d.isoweekday() % 7].capitalize()
-                    time_str = offered.slot.time.strftime("%H:%M")
-                    # Genera la tupla (button_id, button_text)
-                    inline_buttons.append((f"slot_{offered.option}", f"{weekday} {time_str}"))
-                
-                outgoing = OutgoingMessage(
-                    texts=[ai2.message],
-                    buttons=inline_buttons
-                )
-            else:
-                # Se sono più di 3 opzioni, mantieni la lista a comparsa standard
-                outgoing = OutgoingMessage(
-                    texts=[ai2.message],
-                    list_button_label="Scegli orario",
-                    list_rows=build_offered_slots_rows(context.offered_slots),
-                )
+            # Lista interattiva: il testo dell'AI resta solo l'introduzione,
+            # gli orari li mostriamo come righe scelte dall'utente col dito,
+            # non più come lista scritta (né dall'AI né in chiaro).
+            outgoing = OutgoingMessage(
+                texts=[ai2.message],
+                list_button_label="Scegli orario",
+                list_rows=build_offered_slots_rows(context.offered_slots),
+            )
         elif response_type in _YES_NO_RESPONSE_TYPES:
             outgoing = OutgoingMessage(texts=[ai2.message], buttons=yes_no_buttons())
         else:
