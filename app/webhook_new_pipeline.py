@@ -13,8 +13,8 @@ from __future__ import annotations
 
 from app.config import Config
 from app.context import repository as context_repository
-from app.integrations.whatsapp import send_whatsapp_message
-from app.orchestrator import handle_message
+from app.integrations.whatsapp import send_whatsapp_buttons, send_whatsapp_list, send_whatsapp_message
+from app.orchestrator import OutgoingMessage, handle_message
 from app.repositories.customer import get_or_create_customer, normalize_phone
 from app.repositories.tenant import get_tenant_by_whatsapp_number, get_tenant_knowledge
 
@@ -54,7 +54,7 @@ async def handle_whatsapp_message_new_pipeline(
     knowledge_texts = {key: knowledge.get(key) or "" for key in _KNOWLEDGE_TEXT_KEYS}
 
     try:
-        context, reply_text = handle_message(
+        context, outgoing = handle_message(
             context=context,
             message_text=combined_text,
             tenant=tenant,
@@ -66,17 +66,31 @@ async def handle_whatsapp_message_new_pipeline(
         # lasciare l'utente senza risposta: messaggio di scuse onesto,
         # e l'errore resta visibile nei log per essere corretto.
         print(f"[new_pipeline] ERRORE non gestito: {exc!r}")
-        reply_text = "Mi scuso, ho avuto un problema tecnico. Un operatore ti risponderà a breve."
+        outgoing = OutgoingMessage(text="Mi scuso, ho avuto un problema tecnico. Un operatore la ricontatterà a breve.")
 
     context_repository.save_context(conv_row["id"], context)
 
     wa_info = tenant.get("info") or {}
+    token = wa_info.get("access_token") or Config.WHATSAPP_TOKEN
+    phone_id = wa_info.get("phone_number_id") or Config.WHATSAPP_PHONE_NUMBER_ID
+
     try:
-        await send_whatsapp_message(
-            phone,
-            reply_text,
-            wa_info.get("access_token") or Config.WHATSAPP_TOKEN,
-            wa_info.get("phone_number_id") or Config.WHATSAPP_PHONE_NUMBER_ID,
-        )
+        sent = None
+        if outgoing.list_rows:
+            sent = await send_whatsapp_list(
+                phone, outgoing.text, outgoing.list_button_label or "Scegli", outgoing.list_rows, token, phone_id
+            )
+        elif outgoing.buttons:
+            sent = await send_whatsapp_buttons(phone, outgoing.text, outgoing.buttons, token, phone_id)
+        else:
+            sent = await send_whatsapp_message(phone, outgoing.text, token, phone_id)
+
+        if sent is None:
+            # L'invio interattivo (o quello semplice) è fallito: mai
+            # lasciare l'utente senza risposta. Se avevamo tentato
+            # bottoni/lista, ripieghiamo sul solo testo.
+            if outgoing.list_rows or outgoing.buttons:
+                print("[new_pipeline] invio interattivo fallito, ripiego su testo semplice")
+                await send_whatsapp_message(phone, outgoing.text, token, phone_id)
     except Exception as send_err:
         print(f"[new_pipeline] invio WhatsApp fallito: {send_err}")
