@@ -74,12 +74,15 @@ def yes_no_buttons(yes_id: str = "yes", no_id: str = "no") -> list[tuple[str, st
 
 
 def _period_text(day: dict) -> str:
-    periods = []
-    if day.get("morning"):
-        periods.append("mattina")
-    if day.get("afternoon"):
-        periods.append("pomeriggio")
-    return " e ".join(periods)
+    morning = bool(day.get("morning"))
+    afternoon = bool(day.get("afternoon"))
+    if morning and afternoon:
+        return "sia mattina che pomeriggio"
+    if morning:
+        return "solo mattina"
+    if afternoon:
+        return "solo pomeriggio"
+    return ""
 
 
 def _format_day_with_period(day: dict) -> str:
