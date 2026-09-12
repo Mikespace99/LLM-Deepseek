@@ -8,6 +8,11 @@ non dipendere dalla catena Supabase/repositories, che booking/engine.py
 trascina con se'.
 """
 
+from __future__ import annotations
+
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
+
 ITALIAN_WEEKDAYS = [
     "domenica",
     "lunedì",
@@ -32,3 +37,12 @@ ITALIAN_MONTHS = [
     "novembre",
     "dicembre",
 ]
+
+
+def today_in_tz(tz_name: str | None) -> date:
+    """Data odierna nel fuso del tenant - mai calcolata dall'AI."""
+    try:
+        tz = ZoneInfo(tz_name or "Europe/Rome")
+    except Exception:
+        tz = ZoneInfo("Europe/Rome")
+    return datetime.now(tz).date()
