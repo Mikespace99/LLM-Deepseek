@@ -1,11 +1,11 @@
 from __future__ import annotations
 import datetime
 from app.context.models import ConversationContext, ConversationStep, PendingAction, BookingStatus
-from app.supabase_client import get_supabase  # FIX: Importata la funzione nativa originale
+from app.supabase_client import get_supabase
 
-async def process_booking_step(context: ConversationContext, message_text: str) -> ConversationContext:
+async def start_search(context: ConversationContext, message_text: str) -> ConversationContext:
     """
-    Esegue la business logic legata al flusso di Booking basandosi sullo stato del contesto.
+    Punto di ingresso principale per il flusso di prenotazione (Booking) chiamato da routing_table.py.
     """
     step = context.conversation.current_step
 
@@ -22,7 +22,7 @@ async def process_booking_step(context: ConversationContext, message_text: str) 
         start_date = search_params.date_from or datetime.date.today()
         end_date = search_params.date_to or (start_date + datetime.timedelta(days=7))
 
-        # 2. Richiamo del client Supabase tramite la tua funzione nativa get_supabase()
+        # 2. Richiamo del client Supabase tramite get_supabase()
         try:
             supabase_client = get_supabase()
             response = supabase_client.table("slots")\
