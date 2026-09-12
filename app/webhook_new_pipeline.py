@@ -38,22 +38,35 @@ async def handle_whatsapp_message_new_pipeline(
     business_phone: str,
     combined_text: str,
 ) -> None:
-    tenant = get_tenant_by_whatsapp_number(business_phone)
-    if not tenant:
-        print(f"[new_pipeline] tenant non trovato per {business_phone}, messaggio ignorato")
-        return
-
-    tenant_id = tenant["id"]
-    customer = get_or_create_customer(tenant_id, phone)
-
-    context, conv_row, expired = context_repository.get_or_create_context(
-        tenant_id, customer, phone
+    context = None
+    conv_row = None
+    tenant = None
+    # Messaggio di default: usato SOLO se qualcosa va storto prima di
+    # arrivare a una risposta vera. Onesto, non tecnico, e lascia
+    # sempre una via d'uscita al cliente.
+    outgoing = OutgoingMessage(
+        text=(
+            "Non so rispondere su questo punto: deve chiedere direttamente allo studio. "
+            "Se ha altre richieste sono qui, altrimenti la saluto."
+        )
     )
 
-    knowledge = get_tenant_knowledge(tenant_id) or {}
-    knowledge_texts = {key: knowledge.get(key) or "" for key in _KNOWLEDGE_TEXT_KEYS}
-
     try:
+        tenant = get_tenant_by_whatsapp_number(business_phone)
+        if not tenant:
+            print(f"[new_pipeline] tenant non trovato per {business_phone}, messaggio ignorato")
+            return
+
+        tenant_id = tenant["id"]
+        customer = get_or_create_customer(tenant_id, phone)
+
+        context, conv_row, expired = context_repository.get_or_create_context(
+            tenant_id, customer, phone
+        )
+
+        knowledge = get_tenant_knowledge(tenant_id) or {}
+        knowledge_texts = {key: knowledge.get(key) or "" for key in _KNOWLEDGE_TEXT_KEYS}
+
         context, outgoing = handle_message(
             context=context,
             message_text=combined_text,
@@ -62,15 +75,20 @@ async def handle_whatsapp_message_new_pipeline(
             knowledge_texts=knowledge_texts,
         )
     except Exception as exc:
-        # Qualunque errore imprevisto nella nuova pipeline non deve mai
-        # lasciare l'utente senza risposta: messaggio di scuse onesto,
-        # e l'errore resta visibile nei log per essere corretto.
+        # Qualunque errore imprevisto, in QUALUNQUE fase (non solo
+        # nell'interpretazione del messaggio, ma anche nel recupero di
+        # cliente/contesto/tenant) non deve mai lasciare l'utente senza
+        # risposta. L'errore resta visibile nei log per essere corretto;
+        # `outgoing` è già pronto con il messaggio onesto definito sopra.
         print(f"[new_pipeline] ERRORE non gestito: {exc!r}")
-        outgoing = OutgoingMessage(text="Mi scuso, ho avuto un problema tecnico. Un operatore la ricontatterà a breve.")
 
-    context_repository.save_context(conv_row["id"], context)
+    if context is not None and conv_row is not None:
+        try:
+            context_repository.save_context(conv_row["id"], context)
+        except Exception as save_err:
+            print(f"[new_pipeline] salvataggio context fallito: {save_err}")
 
-    wa_info = tenant.get("info") or {}
+    wa_info = (tenant or {}).get("info") or {}
     token = wa_info.get("access_token") or Config.WHATSAPP_TOKEN
     phone_id = wa_info.get("phone_number_id") or Config.WHATSAPP_PHONE_NUMBER_ID
 
