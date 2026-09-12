@@ -1,7 +1,7 @@
 from __future__ import annotations
 import datetime
 from app.context.models import ConversationContext, ConversationStep, PendingAction, BookingStatus
-from app.supabase_client import supabase_client  # FIX: Importato il nome reale corretto dal tuo modulo
+from app.supabase_client import get_supabase  # FIX: Importata la funzione nativa originale
 
 async def process_booking_step(context: ConversationContext, message_text: str) -> ConversationContext:
     """
@@ -22,8 +22,9 @@ async def process_booking_step(context: ConversationContext, message_text: str) 
         start_date = search_params.date_from or datetime.date.today()
         end_date = search_params.date_to or (start_date + datetime.timedelta(days=7))
 
-        # 2. Query al database tramite il client reale 'supabase_client'
+        # 2. Richiamo del client Supabase tramite la tua funzione nativa get_supabase()
         try:
+            supabase_client = get_supabase()
             response = supabase_client.table("slots")\
                 .select("id, date, time")\
                 .eq("status", "AVAILABLE")\
