@@ -73,6 +73,46 @@ def yes_no_buttons(yes_id: str = "yes", no_id: str = "no") -> list[tuple[str, st
     return [(yes_id, "Sì"), (no_id, "No")]
 
 
+def _format_day_with_period(day: dict) -> str:
+    periods = []
+    if day.get("morning"):
+        periods.append("mattina")
+    if day.get("afternoon"):
+        periods.append("pomeriggio")
+    period_text = " e ".join(periods)
+    return f"{day['label']} ({period_text})" if period_text else day["label"]
+
+
+def format_week_overview(data: dict) -> str:
+    """
+    Panoramica di disponibilità (questa settimana / prossima, o la
+    prima disponibile più avanti), scritta in modo deterministico -
+    stesso motivo per cui non lasciamo mai scrivere date reali all'AI.
+    """
+    this_week = data.get("this_week") or []
+    next_week = data.get("next_week") or []
+    first_available = data.get("first_available")
+
+    if not this_week and not next_week:
+        if first_available:
+            return (
+                "Al momento non ci sono disponibilità nelle prossime due settimane. "
+                f"La prima disponibilità che ho trovato è {_format_day_with_period(first_available)}."
+            )
+        return (
+            "Al momento non risultano disponibilità nei prossimi giorni. "
+            "La invito a contattare direttamente lo studio."
+        )
+
+    lines = []
+    if this_week:
+        lines.append("Questa settimana: " + ", ".join(_format_day_with_period(d) for d in this_week))
+    if next_week:
+        lines.append("Settimana prossima: " + ", ".join(_format_day_with_period(d) for d in next_week))
+    lines.append("Mi faccia sapere quale preferisce, così le mostro gli orari precisi.")
+    return "\n".join(lines)
+
+
 def time_of_day_greeting(tz_name: str | None = None, now: datetime | None = None) -> str:
     """
     Saluto in base all'orario, calcolato da Python - mai dall'AI, così
