@@ -48,6 +48,31 @@ def format_appointment_target_question(appointment, customer_name: str | None = 
     )
 
 
+def build_offered_slots_rows(offered_slots: list[OfferedSlot]) -> list[dict]:
+    """
+    Righe per la lista interattiva WhatsApp - stessi dati di
+    format_offered_slots, ma come struttura invece che testo. Titolo
+    "Giorno HH:MM" (univoco anche se più giorni condividono lo stesso
+    orario), descrizione con la data estesa.
+    """
+    rows = []
+    for offered in offered_slots[:10]:  # WhatsApp: max 10 righe totali
+        d = offered.slot.date
+        weekday = ITALIAN_WEEKDAYS[d.isoweekday() % 7].capitalize()
+        month = ITALIAN_MONTHS[d.month - 1]
+        time_str = offered.slot.time.strftime("%H:%M")
+        rows.append({
+            "id": f"slot_{offered.option}",
+            "title": f"{weekday} {time_str}",
+            "description": f"{d.day} {month}",
+        })
+    return rows
+
+
+def yes_no_buttons(yes_id: str = "yes", no_id: str = "no") -> list[tuple[str, str]]:
+    return [(yes_id, "Sì"), (no_id, "No")]
+
+
 def time_of_day_greeting(tz_name: str | None = None, now: datetime | None = None) -> str:
     """
     Saluto in base all'orario, calcolato da Python - mai dall'AI, così
