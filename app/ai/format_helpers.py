@@ -24,6 +24,7 @@ def format_offered_slots(offered_slots: list[OfferedSlot]) -> str:
         weekday = ITALIAN_WEEKDAYS[d.isoweekday() % 7]
         month = ITALIAN_MONTHS[d.month - 1]
         time_str = offered.slot.time.strftime("%H:%M")
+        # FIX PUNTO 1: Formulazione fluida, naturale e pulita per le fasce orarie
         lines.append(f"{offered.option}. {weekday.capitalize()} {d.day} {month} alle {time_str}")
 
     return "\n".join(lines) + "\n\nQuale preferisce? (può rispondere con il numero o con l'orario)"
@@ -101,7 +102,7 @@ def format_week_overview(data: dict, today: date) -> list[str]:
     if not this_week and not next_week:
         if first_available:
             return [
-                "Al momento non ci sono disponibilità nelle prossime due settimane. "
+                "Al momento non ci sono disponibilità nelle próximas due settimane. "
                 f"La prima disponibilità che ho trovato è {_format_day_with_period(first_available)}."
             ]
         return [
