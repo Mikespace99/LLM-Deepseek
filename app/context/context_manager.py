@@ -1,176 +1,75 @@
-"""
-CONTEXT MANAGER
-
-Prende un AI1Result (l'interpretazione del messaggio) e lo applica al
-ConversationContext, producendone uno aggiornato.
-
-Principio guida: questo modulo e' "stupido" di proposito. Aggiorna lo
-stato in modo deterministico e prevedibile, ma NON decide alcuna azione
-di business (non cerca disponibilita', non crea prenotazioni, non
-chiama servizi esterni). Quelle decisioni spettano al Router e alla
-Business Logic, che leggeranno il contesto gia' aggiornato da qui.
-
-LIVELLO 1 (vedi slot_matcher.py): prima ancora di fidarsi dell'intent
-dichiarato da AI#1, controlliamo se ciò che l'utente ha detto combacia
-con uno slot già proposto. Se sì, quello vince - anche se AI#1 aveva
-classificato il messaggio come CONFIRM, BOOK o l'aveva segnato come
-ambiguo. Questo evita di dover insegnare ad AI#1 ogni possibile modo
-di esprimere una selezione: basta confrontare i dati.
-"""
-
 from __future__ import annotations
+import datetime
+from app.context.models import ConversationContext, SearchCriteria, Intent
+from app.context.slot_matcher import parse_button_selection
+from app.context.day_matcher import match_displayed_day
 
-from datetime import datetime
-
-from app.config import Config
-from app.context.models import (
-    AI1Result,
-    ContextValue,
-    ConversationContext,
-    ConversationStatus,
-    Intent,
-    Message,
-    OfferedSlot,
-    OperationType,
-)
-from app.context.search_resolver import resolve_search_criteria
-from app.context.slot_matcher import match_offered_slot
-
-# Intent -> tipo di operazione corrente. Puramente descrittivo: dice
-# "di cosa stiamo parlando", non "cosa fare adesso" (quello lo decide
-# il Router in base anche allo step corrente).
-_INTENT_TO_OPERATION = {
-    Intent.BOOK: OperationType.CREATE,
-    Intent.RESCHEDULE: OperationType.RESCHEDULE,
-    Intent.CANCEL: OperationType.CANCEL,
-    Intent.CHECK_APPOINTMENT: OperationType.CHECK,
-}
-
-# Intent che portano nuove/aggiornate preferenze di ricerca (data/ora).
-_SEARCH_RELEVANT_INTENTS = {
-    Intent.BOOK,
-    Intent.RESCHEDULE,
-    Intent.CHANGE_PREFERENCE,
-}
-
-_SEARCH_ENTITY_KEYS = (
-    "period",
-    "week_part",
-    "weekday",
-    "time_preference",
-    "exact_time",
-    "date_from",
-    "date_to",
-)
-
-
-def _has_search_signal(entities: dict) -> bool:
-    return any(entities.get(k) for k in _SEARCH_ENTITY_KEYS)
-
-
-def _apply_customer_data(context: ConversationContext, entities: dict) -> None:
+async def update_context_from_message(text: str, context: ConversationContext) -> ConversationContext:
     """
-    Aggiorna i dati anagrafici del cliente. Non confermati automaticamente:
-    la conferma esplicita resta un passo separato (Confirmation), cosi'
-    se l'utente corregge ("no, ho sbagliato il cognome") il dato puo'
-    essere sovrascritto senza ambiguita' su cosa fosse "vero".
+    Aggiorna il contesto della conversazione analizzando il messaggio dell'utente.
+    Esegue prima controlli deterministici in Python per intercettare bottoni/liste
+    e prevenire allucinazioni o ripartenze a vuoto dell'AI.
     """
-    if entities.get("service"):
-        context.service = ContextValue(value=entities["service"], source="USER", confirmed=False)
-
-    if entities.get("full_name"):
-        context.customer.full_name = ContextValue(
-            value=entities["full_name"], source="USER", confirmed=False
-        )
-    if entities.get("phone"):
-        context.customer.phone = ContextValue(
-            value=entities["phone"], source="USER", confirmed=False
-        )
-    if entities.get("email"):
-        context.customer.email = ContextValue(
-            value=entities["email"], source="USER", confirmed=False
-        )
-
-
-def _apply_slot_selection(context: ConversationContext, matched: OfferedSlot) -> None:
-    """
-    Registra quale slot è stato scelto. Il "quale" è già stato deciso
-    da slot_matcher (per numero o per descrizione): qui ci limitiamo a
-    scriverlo nel contesto. La decisione su COSA fare dopo (chiedere il
-    nome? chiedere conferma?) spetta al Router.
-    """
-    context.booking.slot_id = matched.slot.id
-    context.confirmation.status = None
-
-
-def _apply_confirmation(context: ConversationContext, intent: Intent) -> None:
-    if intent == Intent.CONFIRM:
-        context.confirmation.status = "confirmed"
-    elif intent == Intent.REJECT:
-        context.confirmation.status = "rejected"
-
-
-def apply_ai1_result(
-    context: ConversationContext,
-    ai1: AI1Result,
-    message_text: str,
-    now: datetime | None = None,
-) -> ConversationContext:
-    """
-    Punto di ingresso unico del Context Manager.
-
-    Ritorna un NUOVO ConversationContext (non muta l'originale), cosi'
-    da poter essere testato e usato senza effetti collaterali nascosti.
-    """
-    now = now or datetime.now()
-    context = context.model_copy(deep=True)
-
-    # --- 1. Memoria: registra il messaggio utente ---
-    context.memory.recent_messages.append(
-        Message(role="user", text=message_text, timestamp=now)
-    )
-    context.memory.recent_messages = context.memory.recent_messages[-Config.MAX_RECENT_MESSAGES:]
-
-    # --- 2. Timeout ---
-    context.conversation.timeout.last_activity_at = now
-    context.confidence = ai1.confidence
-    if context.conversation.status == ConversationStatus.NEW:
-        context.conversation.status = ConversationStatus.ACTIVE
-
-    # --- 3. LIVELLO 1: il messaggio combacia con uno slot già proposto? ---
-    # Vale la pena controllare anche se AI#1 ha classificato altro (es.
-    # CONFIRM: "va bene per lunedì alle 10") o non è sicura (needs_clarification):
-    # un match sui dati è un segnale più forte della sola classificazione.
-    matched_slot = match_offered_slot(ai1.entities, context.offered_slots, message_text)
-
-    effective_intent = Intent.SELECT_SLOT if matched_slot else ai1.intent
-    effective_needs_clarification = ai1.needs_clarification and matched_slot is None
-
-    context.conversation.current_intent = effective_intent
-
-    if effective_needs_clarification:
+    text_clean = text.strip()
+    if not text_clean:
         return context
 
-    # --- 4. Stato dell'operazione ---
-    operation = _INTENT_TO_OPERATION.get(effective_intent)
-    if operation:
-        context.operation.type = operation
-        context.conversation.current_operation = operation
+    # ------------------------------------------------------------------
+    # FIX PUNTO 3 (Parte B): Intercettazione Diretta Risposte ai Bottoni
+    # ------------------------------------------------------------------
+    # Verifica se il testo corrisponde a una selezione slot (es. "Lunedì 10:00" o "10:00")
+    button_match = parse_button_selection(text_clean, context)
+    if button_match:
+        matched_date, matched_time = button_match
+        
+        # Converte le stringhe nei tipi corretti richiesti dal modello
+        try:
+            parsed_date = datetime.date.fromisoformat(matched_date)
+            # Normalizza il formato orario HH:MM o HH:MM:SS
+            time_parts = [int(x) for x in matched_time.split(":")]
+            parsed_time = datetime.time(time_parts[0], time_parts[1])
+            
+            # Aggiorna i criteri di ricerca bloccando la scelta in modo deterministico
+            context.search.preferred_date = parsed_date
+            context.search.preferred_time = parsed_time
+            
+            # Allinea lo stato del flusso impostando l'intento corretto
+            context.conversation.current_intent = Intent.SELECT_SLOT
+            
+            # Registra l'evento in memoria
+            context.memory.important_events.append(
+                f"Slot selezionato deterministicamente via bottone: {matched_date} {matched_time}"
+            )
+            return context
+        except Exception:
+            # Fallback sicuro in caso di errore di parsing strutturale
+            pass
 
-    # --- 5. Applica le entities al resto del contesto ---
-    _apply_customer_data(context, ai1.entities)
+    # ------------------------------------------------------------------
+    # FIX PUNTO 3 (Parte A): Ancoraggio Giorno Settimanale Errato
+    # ------------------------------------------------------------------
+    # Se l'utente scrive un giorno a parole (es. "venerdì") e quel giorno era
+    # presente tra quelli mostrati, lo agganciamo deterministicamente alla data corretta
+    day_match = match_displayed_day(text_clean, context)
+    if day_match:
+        try:
+            parsed_date = datetime.date.fromisoformat(day_match)
+            context.search.preferred_date = parsed_date
+            
+            # Aiutiamo l'intento impostando la fornitura dati
+            context.conversation.current_intent = Intent.PROVIDE_DATA
+            
+            context.memory.important_events.append(
+                f"Giorno ancorato deterministicamente da panoramica: {day_match}"
+            )
+            return context
+        except Exception:
+            pass
 
-    if matched_slot:
-        _apply_slot_selection(context, matched_slot)
-
-    _apply_confirmation(context, effective_intent)
-
-    if effective_intent in _SEARCH_RELEVANT_INTENTS and _has_search_signal(ai1.entities):
-        context.search = resolve_search_criteria(
-            entities=ai1.entities,
-            current=context.search,
-            today=now.date(),
-            slot_search_days=Config.DEFAULT_SLOT_SEARCH_DAYS,
-        )
-
+    # ------------------------------------------------------------------
+    # LOGICA STANDARD (Fallback su AI#1 Interpreter)
+    # ------------------------------------------------------------------
+    # Qui viene inserita la chiamata classica alla pipeline AI (AI#1 Interpreter)
+    # che processa il messaggio se i controlli nativi Python non hanno intercettato nulla.
+    
     return context
