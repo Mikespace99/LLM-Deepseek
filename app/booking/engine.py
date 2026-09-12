@@ -225,6 +225,19 @@ def _compute_search_window(ctx: dict) -> dict:
         ctx = dict(ctx)
         ctx["preferences"] = prefs
 
+        ctx.update(
+        {
+            "from_date": from_date,
+            "to_date": to_date,
+            "preferred_window": preferred_window,
+            "search_was_narrow": search_was_narrow,
+        }
+    )
+
+    print(f"[SEARCH-WINDOW] today={today} from_date={from_date} to_date={to_date} prefs={prefs}")
+
+    return ctx
+
     ignore_prefs = bool(
         prefs.get("ignore_preferences")
     )
