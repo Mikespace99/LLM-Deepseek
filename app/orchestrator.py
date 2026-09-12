@@ -19,6 +19,7 @@ from app.ai.context_summary import build_ai1_input
 from app.ai.format_helpers import (
     build_offered_slots_rows,
     format_appointment_target_question,
+    format_week_overview,
     time_of_day_greeting,
     yes_no_buttons,
 )
@@ -90,6 +91,11 @@ def handle_message(
             text=format_appointment_target_question(context.appointments[0], context.customer.full_name.value),
             buttons=yes_no_buttons(),
         )
+    elif response_type == ResponseType.SHOW_WEEK_OVERVIEW:
+        # Stesso principio: giorni/fasce orarie reali, mai scritti
+        # dall'AI. Testo semplice (non lista/bottoni): è un contenuto
+        # discorsivo, non una scelta puntuale.
+        outgoing = OutgoingMessage(text=format_week_overview(system_result.data))
     else:
         # Solo i messaggi dell'UTENTE, mai le risposte precedenti del bot:
         # quelle potevano contenere liste di slot scritte in un turno precedente,
