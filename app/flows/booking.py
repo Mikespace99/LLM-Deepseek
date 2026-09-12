@@ -15,10 +15,10 @@ bisogno di sapere altro (vedi router/routing_table.py).
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import date, timedelta
 
 from app.booking import engine
-from app.context.models import ConversationContext, ConversationStep, PendingAction, SystemResult
+from app.context.models import ConversationContext, ConversationStep, OfferedDay, PendingAction, SystemResult
 from app.flows.common import (
     advance_after_customer_data,
     advance_after_slot_selection,
@@ -92,9 +92,15 @@ def show_week_overview(
     context.conversation.current_step = ConversationStep.SEARCH_AVAILABILITY
     context.conversation.pending_action = PendingAction.PROVIDE_DATE
 
+    shown_days = (this_week[:3] + next_week[:3]) if (this_week or next_week) else []
+    context.offered_days = [
+        OfferedDay(option=i, date=date.fromisoformat(d["date"]), label=d["label"])
+        for i, d in enumerate(shown_days, start=1)
+    ]
+
     return context, SystemResult(
         success=True,
-        data={"this_week": this_week, "next_week": next_week, "first_available": first_available},
+        data={"this_week": this_week[:3], "next_week": next_week[:3], "first_available": first_available},
     )
 
 
