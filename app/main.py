@@ -771,10 +771,28 @@ async def whatsapp_webhook(
 
         msg = messages[0]
 
-        if msg.get("type") != "text":
+        msg_type = msg.get("type")
+        if msg_type not in ("text", "interactive"):
             return {
                 "status": "ignored"
             }
+
+        if msg_type == "text":
+            text_body = msg["text"]["body"]
+        else:
+            # Click su un bottone o su una riga di lista: usiamo il
+            # titolo che l'utente ha visto e scelto, esattamente come se
+            # l'avesse scritto a mano. Così tutta la pipeline (AI#1,
+            # Context Manager, slot_matcher...) lo tratta allo stesso
+            # identico modo di un messaggio di testo, senza bisogno di
+            # un percorso separato.
+            interactive = msg.get("interactive", {})
+            reply = interactive.get("button_reply") or interactive.get("list_reply") or {}
+            text_body = reply.get("title", "")
+            if not text_body:
+                return {
+                    "status": "ignored"
+                }
 
         metadata = value.get(
             "metadata",
@@ -799,7 +817,7 @@ async def whatsapp_webhook(
                 "display_phone_number"
             ),
             "from": msg.get("from"),
-            "message": msg["text"]["body"],
+            "message": text_body,
             "message_id": msg.get("id"),
             "received_at": received_at,
         }
