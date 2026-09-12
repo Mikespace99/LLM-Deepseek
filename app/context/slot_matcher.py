@@ -29,6 +29,33 @@ from app.utils.it_dates import ITALIAN_WEEKDAYS
 # numero è tra quelli realmente offerti (evita falsi positivi tipo "5 minuti").
 _LEADING_NUMBER = re.compile(r"^\s*(\d{1,2})\b")
 
+# Formato ESATTO usato da build_offered_slots_rows per il titolo di un
+# bottone/riga lista ("Lunedì 09:00"). Quando l'utente tocca un nostro
+# bottone, il testo che torna indietro è ESATTAMENTE questo: lo
+# riconosciamo qui in modo diretto, senza passare per AI#1 - zero
+# rischio di interpretazione, perché il formato lo decidiamo noi.
+_ROW_TITLE_PATTERN = re.compile(
+    r"^\s*(lunedì|martedì|mercoledì|giovedì|venerdì|sabato|domenica)\s+(\d{1,2}):(\d{2})\s*$",
+    re.IGNORECASE,
+)
+
+
+def _match_row_title(message_text: str, offered_slots: list[OfferedSlot]) -> OfferedSlot | None:
+    if not message_text:
+        return None
+    m = _ROW_TITLE_PATTERN.match(message_text)
+    if not m:
+        return None
+    weekday, hh, mm = m.group(1).lower(), int(m.group(2)), int(m.group(3))
+    return next(
+        (
+            o for o in offered_slots
+            if ITALIAN_WEEKDAYS[o.slot.date.isoweekday() % 7] == weekday
+            and o.slot.time.hour == hh and o.slot.time.minute == mm
+        ),
+        None,
+    )
+
 
 def _match_leading_number(message_text: str, offered_slots: list[OfferedSlot]) -> OfferedSlot | None:
     if not message_text:
@@ -47,6 +74,14 @@ def match_offered_slot(
 ) -> OfferedSlot | None:
     if not offered_slots:
         return None
+
+    # Priorità assoluta: se il testo è ESATTAMENTE nel formato di un
+    # nostro bottone/riga, è quello - indipendentemente da cosa avrebbe
+    # estratto AI#1. Copre in modo affidabile al 100% i click su bottoni
+    # e liste che generiamo noi stessi.
+    direct = _match_row_title(message_text.strip() if message_text else "", offered_slots)
+    if direct:
+        return direct
 
     slot_number = entities.get("slot_number")
     if slot_number is not None:
