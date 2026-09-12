@@ -11,8 +11,10 @@ utenti.
 
 from __future__ import annotations
 
+from app.ai.format_helpers import format_ack_message
 from app.config import Config
 from app.context import repository as context_repository
+from app.context.models import ConversationStatus
 from app.integrations.whatsapp import send_whatsapp_buttons, send_whatsapp_list, send_whatsapp_message
 from app.orchestrator import OutgoingMessage, handle_message
 from app.repositories.customer import get_or_create_customer, normalize_phone
@@ -33,6 +35,28 @@ def should_use_new_pipeline(phone: str) -> bool:
     return normalize_phone(phone) in test_phones
 
 
+async def _send_sequence(outgoing: OutgoingMessage, phone: str, token: str, phone_id: str) -> None:
+    """Invia i messaggi in ordine; bottoni/lista solo sull'ultimo. Ripiega su testo se l'interattivo fallisce."""
+    texts = outgoing.texts or [""]
+    last_index = len(texts) - 1
+
+    for i, text in enumerate(texts):
+        is_last = i == last_index
+        sent = None
+        if is_last and outgoing.list_rows:
+            sent = await send_whatsapp_list(
+                phone, text, outgoing.list_button_label or "Scegli", outgoing.list_rows, token, phone_id
+            )
+        elif is_last and outgoing.buttons:
+            sent = await send_whatsapp_buttons(phone, text, outgoing.buttons, token, phone_id)
+        else:
+            sent = await send_whatsapp_message(phone, text, token, phone_id)
+
+        if sent is None and is_last and (outgoing.list_rows or outgoing.buttons):
+            print("[new_pipeline] invio interattivo fallito, ripiego su testo semplice")
+            await send_whatsapp_message(phone, text, token, phone_id)
+
+
 async def handle_whatsapp_message_new_pipeline(
     phone: str,
     business_phone: str,
@@ -45,10 +69,10 @@ async def handle_whatsapp_message_new_pipeline(
     # arrivare a una risposta vera. Onesto, non tecnico, e lascia
     # sempre una via d'uscita al cliente.
     outgoing = OutgoingMessage(
-        text=(
+        texts=[
             "Non so rispondere su questo punto: deve chiedere direttamente allo studio. "
             "Se ha altre richieste sono qui, altrimenti la saluto."
-        )
+        ]
     )
 
     try:
@@ -57,12 +81,23 @@ async def handle_whatsapp_message_new_pipeline(
             print(f"[new_pipeline] tenant non trovato per {business_phone}, messaggio ignorato")
             return
 
+        wa_info = tenant.get("info") or {}
+        token = wa_info.get("access_token") or Config.WHATSAPP_TOKEN
+        phone_id = wa_info.get("phone_number_id") or Config.WHATSAPP_PHONE_NUMBER_ID
+
         tenant_id = tenant["id"]
         customer = get_or_create_customer(tenant_id, phone)
 
         context, conv_row, expired = context_repository.get_or_create_context(
             tenant_id, customer, phone
         )
+
+        # Ack IMMEDIATO, prima ancora di interpellare AI#1/il motore di
+        # ricerca: solo al primo messaggio di una conversazione nuova,
+        # così il cliente sa subito che stiamo verificando, invece di
+        # aspettare in silenzio mentre facciamo la ricerca vera.
+        if context.conversation.status == ConversationStatus.NEW:
+            await send_whatsapp_message(phone, format_ack_message(tenant.get("timezone")), token, phone_id)
 
         knowledge = get_tenant_knowledge(tenant_id) or {}
         knowledge_texts = {key: knowledge.get(key) or "" for key in _KNOWLEDGE_TEXT_KEYS}
@@ -93,22 +128,6 @@ async def handle_whatsapp_message_new_pipeline(
     phone_id = wa_info.get("phone_number_id") or Config.WHATSAPP_PHONE_NUMBER_ID
 
     try:
-        sent = None
-        if outgoing.list_rows:
-            sent = await send_whatsapp_list(
-                phone, outgoing.text, outgoing.list_button_label or "Scegli", outgoing.list_rows, token, phone_id
-            )
-        elif outgoing.buttons:
-            sent = await send_whatsapp_buttons(phone, outgoing.text, outgoing.buttons, token, phone_id)
-        else:
-            sent = await send_whatsapp_message(phone, outgoing.text, token, phone_id)
-
-        if sent is None:
-            # L'invio interattivo (o quello semplice) è fallito: mai
-            # lasciare l'utente senza risposta. Se avevamo tentato
-            # bottoni/lista, ripieghiamo sul solo testo.
-            if outgoing.list_rows or outgoing.buttons:
-                print("[new_pipeline] invio interattivo fallito, ripiego su testo semplice")
-                await send_whatsapp_message(phone, outgoing.text, token, phone_id)
+        await _send_sequence(outgoing, phone, token, phone_id)
     except Exception as send_err:
         print(f"[new_pipeline] invio WhatsApp fallito: {send_err}")
