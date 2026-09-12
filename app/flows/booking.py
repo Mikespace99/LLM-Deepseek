@@ -16,7 +16,6 @@ bisogno di sapere altro (vedi router/routing_table.py).
 from __future__ import annotations
 
 import traceback
-
 from datetime import date, timedelta
 
 from app.booking import engine
@@ -75,10 +74,7 @@ def show_week_overview(
         )
     except Exception as exc:
         print(f"[flows.booking.show_week_overview] errore ricerca giorni disponibili: {exc!r}")
-            except Exception as exc:
-        print(f"[flows.booking.show_week_overview] errore ricerca giorni disponibili: {exc!r}")
         traceback.print_exc()
-        return context, SystemResult(success=False, error_code="TECHNICAL_ERROR")
         return context, SystemResult(success=False, error_code="TECHNICAL_ERROR")
 
     available_days = two_weeks.get("available_days") or []
@@ -91,6 +87,7 @@ def show_week_overview(
             wide = engine.search_available_days(tenant, knowledge, {**base_data, "preferences": {}}, max_days=1)
         except Exception as exc:
             print(f"[flows.booking.show_week_overview] errore ricerca prima disponibilità: {exc!r}")
+            traceback.print_exc()
             return context, SystemResult(success=False, error_code="TECHNICAL_ERROR")
         wide_days = wide.get("available_days") or []
         first_available = wide_days[0] if wide_days else None
@@ -157,6 +154,7 @@ def confirm(
         )
     except Exception as exc:
         print(f"[flows.booking.confirm] errore creazione appuntamento: {exc!r}")
+        traceback.print_exc()
         return context, SystemResult(success=False, error_code="TECHNICAL_ERROR")
 
     result = booking_res.get("result") or {}
