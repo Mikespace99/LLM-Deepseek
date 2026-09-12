@@ -13,8 +13,15 @@ prima del collegamento definitivo.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 from app.ai.context_summary import build_ai1_input
-from app.ai.format_helpers import format_appointment_target_question, time_of_day_greeting
+from app.ai.format_helpers import (
+    build_offered_slots_rows,
+    format_appointment_target_question,
+    time_of_day_greeting,
+    yes_no_buttons,
+)
 from app.ai.interpreter import run_ai1_interpreter
 from app.ai.responder import compose_final_message, run_ai2_responder
 from app.ai.response_type_resolver import resolve_response_type
@@ -26,6 +33,22 @@ from app.router.intent_router import route
 # saltano il Router e vanno dritti alla risposta.
 _CHITCHAT_INTENTS = {Intent.GREETING, Intent.THANKS, Intent.ASK_INFORMATION}
 
+# response_type per cui proponiamo bottoni Sì/No invece di aspettare testo libero.
+_YES_NO_RESPONSE_TYPES = {ResponseType.ASK_CONFIRMATION, ResponseType.CONFIRM_APPOINTMENT_TARGET}
+
+
+@dataclass
+class OutgoingMessage:
+    """
+    Cosa mandare all'utente. `text` è sempre presente (anche come
+    fallback se l'invio interattivo dovesse fallire); `buttons`/
+    `list_rows` sono popolati solo quando ha senso proporli.
+    """
+    text: str
+    buttons: list[tuple[str, str]] | None = None
+    list_button_label: str | None = None
+    list_rows: list[dict] = field(default_factory=list)
+
 
 def handle_message(
     context: ConversationContext,
@@ -33,7 +56,7 @@ def handle_message(
     tenant: dict,
     knowledge: dict,
     knowledge_texts: dict | None = None,
-) -> tuple[ConversationContext, str]:
+) -> tuple[ConversationContext, OutgoingMessage]:
     # È il primo messaggio di questa conversazione? Va controllato PRIMA
     # di apply_ai1_result, che porta lo status da NEW ad ACTIVE.
     is_first_message = context.conversation.status == ConversationStatus.NEW
@@ -57,14 +80,15 @@ def handle_message(
     if ai1.needs_clarification:
         response_type = ResponseType.ASK_CLARIFICATION
 
-    # 5. Scrittura del messaggio finale.
-    # CONFIRM_APPOINTMENT_TARGET è un caso speciale: la domanda contiene
-    # una data/ora/nome reali, quindi la componiamo in modo deterministico
-    # (format_helpers) invece di farla scrivere ad AI#2 - stesso motivo
-    # per cui non le facciamo mai scrivere gli slot proposti.
+    # 5. Costruzione del messaggio, testo + eventuali bottoni/lista.
     if response_type == ResponseType.CONFIRM_APPOINTMENT_TARGET and context.appointments:
-        final_message = format_appointment_target_question(
-            context.appointments[0], context.customer.full_name.value
+        # Caso speciale: la domanda contiene una data/ora/nome reali,
+        # quindi la componiamo in modo deterministico invece di farla
+        # scrivere ad AI#2 - stesso motivo per cui non le facciamo mai
+        # scrivere gli slot proposti.
+        outgoing = OutgoingMessage(
+            text=format_appointment_target_question(context.appointments[0], context.customer.full_name.value),
+            buttons=yes_no_buttons(),
         )
     else:
         # Solo i messaggi dell'UTENTE, mai le risposte precedenti del bot:
@@ -82,19 +106,32 @@ def handle_message(
             knowledge_texts=knowledge_texts,
             operation_type=context.operation.type.value,
         )
-        final_message = compose_final_message(ai2, context)
+
+        if response_type == ResponseType.SHOW_AVAILABILITY and context.offered_slots:
+            # Lista interattiva: il testo dell'AI resta solo l'introduzione,
+            # gli orari li mostriamo come righe scelte dall'utente col dito,
+            # non più come lista scritta (né dall'AI né in chiaro).
+            outgoing = OutgoingMessage(
+                text=ai2.message,
+                list_button_label="Scegli orario",
+                list_rows=build_offered_slots_rows(context.offered_slots),
+            )
+        elif response_type in _YES_NO_RESPONSE_TYPES:
+            outgoing = OutgoingMessage(text=ai2.message, buttons=yes_no_buttons())
+        else:
+            outgoing = OutgoingMessage(text=compose_final_message(ai2, context))
 
     # Il saluto orario è deterministico e va SOLO sul primo messaggio
     # della conversazione: l'AI non lo scrive mai, per non rischiare
     # incoerenze con l'ora reale o di ripeterlo ad ogni turno.
     if is_first_message:
         greeting = time_of_day_greeting(tenant.get("timezone"))
-        final_message = f"{greeting}. {final_message}"
+        outgoing.text = f"{greeting}. {outgoing.text}"
 
     context.memory.recent_messages.append(
         Message(
-            role="assistant", text=final_message, timestamp=context.conversation.timeout.last_activity_at
+            role="assistant", text=outgoing.text, timestamp=context.conversation.timeout.last_activity_at
         )
     )
 
-    return context, final_message
+    return context, outgoing
