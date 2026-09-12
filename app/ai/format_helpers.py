@@ -7,11 +7,11 @@ del tutto con codice deterministico.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from app.context.models import OfferedSlot
-from app.utils.it_dates import ITALIAN_MONTHS, ITALIAN_WEEKDAYS
+from app.utils.it_dates import ITALIAN_MONTHS, ITALIAN_WEEKDAYS, relative_day_label
 
 
 def format_offered_slots(offered_slots: list[OfferedSlot]) -> str:
@@ -73,44 +73,64 @@ def yes_no_buttons(yes_id: str = "yes", no_id: str = "no") -> list[tuple[str, st
     return [(yes_id, "Sì"), (no_id, "No")]
 
 
-def _format_day_with_period(day: dict) -> str:
+def _period_text(day: dict) -> str:
     periods = []
     if day.get("morning"):
         periods.append("mattina")
     if day.get("afternoon"):
         periods.append("pomeriggio")
-    period_text = " e ".join(periods)
+    return " e ".join(periods)
+
+
+def _format_day_with_period(day: dict) -> str:
+    period_text = _period_text(day)
     return f"{day['label']} ({period_text})" if period_text else day["label"]
 
 
-def format_week_overview(data: dict) -> str:
+def format_week_overview(data: dict, today: date) -> list[str]:
     """
-    Panoramica di disponibilità (questa settimana / prossima, o la
-    prima disponibile più avanti), scritta in modo deterministico -
-    stesso motivo per cui non lasciamo mai scrivere date reali all'AI.
+    Panoramica di disponibilità, come SEQUENZA di messaggi (uno per
+    questa settimana, uno per la prossima se disponibile) - mai un
+    unico blocco. Giorni e fasce orarie scritti in modo deterministico,
+    mai dall'AI. Max 3 giorni per settimana.
     """
-    this_week = data.get("this_week") or []
-    next_week = data.get("next_week") or []
+    this_week = (data.get("this_week") or [])[:3]
+    next_week = (data.get("next_week") or [])[:3]
     first_available = data.get("first_available")
 
     if not this_week and not next_week:
         if first_available:
-            return (
+            return [
                 "Al momento non ci sono disponibilità nelle prossime due settimane. "
                 f"La prima disponibilità che ho trovato è {_format_day_with_period(first_available)}."
-            )
-        return (
+            ]
+        return [
             "Al momento non risultano disponibilità nei prossimi giorni. "
             "La invito a contattare direttamente lo studio."
-        )
+        ]
 
-    lines = []
+    messages = []
+
     if this_week:
-        lines.append("Questa settimana: " + ", ".join(_format_day_with_period(d) for d in this_week))
+        lines = "\n".join(
+            f"- {relative_day_label(date.fromisoformat(d['date']), today).capitalize()} ({_period_text(d)})"
+            for d in this_week
+        )
+        messages.append(f"Per questa settimana abbiamo le seguenti disponibilità:\n{lines}")
+    else:
+        messages.append("Per questa settimana non abbiamo disponibilità.")
+
     if next_week:
-        lines.append("Settimana prossima: " + ", ".join(_format_day_with_period(d) for d in next_week))
-    lines.append("Mi faccia sapere quale preferisce, così le mostro gli orari precisi.")
-    return "\n".join(lines)
+        lines = "\n".join(f"- {_format_day_with_period(d)}" for d in next_week)
+        messages.append(f"Per quanto riguarda la prossima settimana ci sono le seguenti disponibilità:\n{lines}")
+
+    messages[-1] += "\n\nMi faccia sapere quale preferisce, così le mostro gli orari precisi."
+    return messages
+
+
+def format_ack_message(tz_name: str | None = None, now: datetime | None = None) -> str:
+    """Messaggio immediato inviato PRIMA di avviare la ricerca, così l'utente non resta in attesa senza segnali."""
+    return f"{time_of_day_greeting(tz_name, now)}, un attimo e verifico."
 
 
 def time_of_day_greeting(tz_name: str | None = None, now: datetime | None = None) -> str:
