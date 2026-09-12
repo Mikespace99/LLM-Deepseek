@@ -20,7 +20,6 @@ from app.context.models import (
 )
 
 _STEP_TO_RESPONSE_TYPE = {
-    ConversationStep.SEARCH_AVAILABILITY: ResponseType.ASK_SEARCH_PREFERENCE,
     ConversationStep.WAITING_FOR_SLOT: ResponseType.SHOW_AVAILABILITY,
     ConversationStep.COLLECTING_CUSTOMER_DATA: ResponseType.ASK_CUSTOMER_DATA,
     ConversationStep.WAITING_FOR_CONFIRMATION: ResponseType.ASK_CONFIRMATION,
@@ -64,5 +63,13 @@ def resolve_response_type(
 
     if step == ConversationStep.IDENTIFY_APPOINTMENT and context.confirmation.confirmation_type == "reschedule_target":
         return ResponseType.CONFIRM_APPOINTMENT_TARGET
+
+    if step == ConversationStep.SEARCH_AVAILABILITY:
+        # Stesso step, significato diverso: per BOOK mostriamo la
+        # panoramica concreta; per RESCHEDULE (e tutto il resto) resta
+        # la domanda semplice "ha una preferenza?".
+        if context.operation.type == OperationType.CREATE:
+            return ResponseType.SHOW_WEEK_OVERVIEW
+        return ResponseType.ASK_SEARCH_PREFERENCE
 
     return _STEP_TO_RESPONSE_TYPE.get(step, ResponseType.INFORMATION)
