@@ -46,3 +46,15 @@ def today_in_tz(tz_name: str | None) -> date:
     except Exception:
         tz = ZoneInfo("Europe/Rome")
     return datetime.now(tz).date()
+
+
+def relative_day_label(d: date, today: date) -> str:
+    """'oggi'/'domani'/'dopodomani', altrimenti il nome del giorno - mai la data assoluta."""
+    delta = (d - today).days
+    if delta == 0:
+        return "oggi"
+    if delta == 1:
+        return "domani"
+    if delta == 2:
+        return "dopodomani"
+    return ITALIAN_WEEKDAYS[d.isoweekday() % 7].capitalize()
