@@ -15,6 +15,8 @@ bisogno di sapere altro (vedi router/routing_table.py).
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from app.booking import engine
 from app.context.models import ConversationContext, ConversationStep, PendingAction, SystemResult
 from app.flows.common import (
@@ -22,9 +24,11 @@ from app.flows.common import (
     advance_after_slot_selection,
     build_search_collected_data,
     find_selected_offered_slot,
+    has_search_criteria,
     offered_slot_to_engine_dict,
-    search_or_ask_preference,
+    run_availability_search,
 )
+from app.utils.it_dates import today_in_tz
 
 
 def start_search(
@@ -32,8 +36,66 @@ def start_search(
     tenant: dict,
     knowledge: dict,
 ) -> tuple[ConversationContext, SystemResult]:
-    """Intent BOOK/CHANGE_PREFERENCE -> cerca disponibilità per un nuovo appuntamento (o chiede la preferenza se manca)."""
-    return search_or_ask_preference(context, tenant, knowledge)
+    """
+    Intent BOOK/CHANGE_PREFERENCE -> se il cliente ha già indicato un
+    criterio, cerca direttamente. Altrimenti, invece di chiedere
+    genericamente "quando vorrebbe?", gli mostriamo cosa c'è già
+    disponibile (questa settimana / la prossima), così sceglie da una
+    base concreta invece di dover indovinare cosa rispondere.
+    """
+    if has_search_criteria(context):
+        return run_availability_search(context, tenant, knowledge)
+    return show_week_overview(context, tenant, knowledge)
+
+
+def show_week_overview(
+    context: ConversationContext,
+    tenant: dict,
+    knowledge: dict,
+) -> tuple[ConversationContext, SystemResult]:
+    context = context.model_copy(deep=True)
+
+    today = today_in_tz(tenant.get("timezone"))
+    this_monday = today - timedelta(days=today.weekday())
+    this_sunday = this_monday + timedelta(days=6)
+    next_sunday = this_sunday + timedelta(days=7)
+
+    base_data = {
+        "service": context.service.value,
+        "location_id": context.professional.location_id if context.professional else None,
+    }
+
+    try:
+        two_weeks = engine.search_available_days(
+            tenant, knowledge,
+            {**base_data, "preferences": {"date_from": today.isoformat(), "date_to": next_sunday.isoformat()}},
+            max_days=14,
+        )
+    except Exception as exc:
+        print(f"[flows.booking.show_week_overview] errore ricerca giorni disponibili: {exc!r}")
+        return context, SystemResult(success=False, error_code="TECHNICAL_ERROR")
+
+    available_days = two_weeks.get("available_days") or []
+    this_week = [d for d in available_days if d["date"] <= this_sunday.isoformat()]
+    next_week = [d for d in available_days if d["date"] > this_sunday.isoformat()]
+
+    first_available = None
+    if not this_week and not next_week:
+        try:
+            wide = engine.search_available_days(tenant, knowledge, {**base_data, "preferences": {}}, max_days=1)
+        except Exception as exc:
+            print(f"[flows.booking.show_week_overview] errore ricerca prima disponibilità: {exc!r}")
+            return context, SystemResult(success=False, error_code="TECHNICAL_ERROR")
+        wide_days = wide.get("available_days") or []
+        first_available = wide_days[0] if wide_days else None
+
+    context.conversation.current_step = ConversationStep.SEARCH_AVAILABILITY
+    context.conversation.pending_action = PendingAction.PROVIDE_DATE
+
+    return context, SystemResult(
+        success=True,
+        data={"this_week": this_week, "next_week": next_week, "first_available": first_available},
+    )
 
 
 def slot_selected(context: ConversationContext, **_ignored) -> tuple[ConversationContext, SystemResult]:
