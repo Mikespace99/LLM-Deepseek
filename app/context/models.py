@@ -4,7 +4,7 @@ Modelli tipizzati del ConversationContext.
 Questo modulo e' NUOVO e isolato: non sostituisce (ancora) `builder.py`,
 che continua a produrre il dict "legacy" usato oggi da main.py.
 
-Verra' collegato al resto del sistema solo nei prossimi step, quando
+Verra' collegato al resto del sistema solo nei primi step, quando
 Router e Business Logic saranno pronti a consumarlo. Fino ad allora
 puo' essere importato e testato in autonomia senza alcun rischio per
 il flusso esistente.
@@ -192,6 +192,10 @@ class SearchCriteria(BaseModel):
 
     excluded_dates: list[date] = Field(default_factory=list)
     excluded_slots: list[str] = Field(default_factory=list)
+    
+    # NUOVO CAMPO FIX PUNTO 3: Memorizza i giorni (es. ["2026-03-20", "2026-03-21"]) 
+    # mostrati nell'ultima panoramica per l'ancoraggio deterministico in Python
+    displayed_days: list[str] = Field(default_factory=list)
 
 
 class AvailableSlot(BaseModel):
@@ -322,8 +326,8 @@ class SystemResult(BaseModel):
 
 
 class AI2Result(BaseModel):
-    """Output di AI#2 (Responder): comunica, non decide."""
-
+    """Output di AI#2 (Responder): genera il testo finale per l'utente."""
+    
     response_type: ResponseType
-    message: str
-    requires_user_response: bool = False
+    text: str
+    suggestions: list[str] = Field(default_factory=list)
