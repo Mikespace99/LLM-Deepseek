@@ -26,7 +26,7 @@ from app.supabase_client import get_supabase
 _SELECT_FULL = (
     "id, tenant_id, customer_id, phone_number, service, service_id, "
     "location_id, appointment_date, appointment_time, duration_minutes, "
-    "status, source, notes, google_event_id, created_at, updated_at, "
+    "status, source, notes, google_event_id, person_name, created_at, updated_at, "
     "customers(id, full_name, phone_number), "
     "services(id, name), locations(id, name)"
 )
@@ -156,6 +156,25 @@ def list_upcoming_for_customer(
 # SCRITTURA
 # ============================================================
 
+def list_person_names_for_customer(tenant_id: str, customer_id: str) -> list[str]:
+    """
+    Nomi distinti già usati in appuntamenti (di qualunque stato/data) di
+    questo cliente - serve a capire se un numero sta prenotando per una
+    NUOVA persona (max 2 per numero, oltre probabilmente non è un uso
+    legittimo del servizio).
+    """
+    sb = get_supabase()
+    res = (
+        sb.table("appointments")
+        .select("person_name")
+        .eq("tenant_id", tenant_id)
+        .eq("customer_id", customer_id)
+        .execute()
+    )
+    names = {row["person_name"] for row in (res.data or []) if row.get("person_name")}
+    return sorted(names)
+
+
 def create_appointment(
     tenant_id: str,
     appointment_date: str,
@@ -171,6 +190,7 @@ def create_appointment(
     status: str = "confirmed",
     google_event_id: str | None = None,
     created_by: str | None = None,
+    person_name: str | None = None,
 ) -> dict:
     """
     Crea una riga appointments. Il vincolo DB appointments_no_overlap
@@ -179,6 +199,12 @@ def create_appointment(
     Postgres rifiuta la seconda insert con un errore di violazione
     exclusion constraint (codice 23P01), che il chiamante deve gestire
     come "slot_conflict".
+
+    person_name: chi è l'INTESTATARIO di QUESTO specifico appuntamento
+    (non necessariamente il titolare del numero di telefono, che può
+    prenotare per persone diverse). Salvato sulla riga, non
+    sull'anagrafica cliente, cosi' due appuntamenti dello stesso numero
+    per persone diverse non si sovrascrivono a vicenda.
     """
     if source not in ("whatsapp", "manual", "block"):
         raise ValueError(f"source non valido: {source}")
@@ -199,6 +225,7 @@ def create_appointment(
         "notes": notes,
         "google_event_id": google_event_id,
         "created_by": created_by,
+        "person_name": person_name,
     }
     payload = {k: v for k, v in payload.items() if v is not None}
     res = sb.table("appointments").insert(payload).execute()
