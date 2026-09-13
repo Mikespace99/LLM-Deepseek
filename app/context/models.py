@@ -169,6 +169,7 @@ class Appointment(BaseModel):
 
     professional_id: str | None = None
     professional_name: str | None = None
+    person_name: str | None = None
 
     status: BookingStatus
 
