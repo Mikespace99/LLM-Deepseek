@@ -13,6 +13,8 @@ from __future__ import annotations
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
+import unicodedata
+
 ITALIAN_WEEKDAYS = [
     "domenica",
     "lunedì",
@@ -58,3 +60,21 @@ def relative_day_label(d: date, today: date) -> str:
     if delta == 2:
         return "dopodomani"
     return ITALIAN_WEEKDAYS[d.isoweekday() % 7].capitalize()
+
+def _strip_accents(s: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+
+
+def normalize_weekday(name: str | None) -> str | None:
+    """
+    Riconosce il nome di un giorno anche senza accento (es. "venerdi"
+    invece di "venerdì", che l'AI a volte scrive senza). Ritorna il
+    nome canonico con accento, o None se non riconosciuto.
+    """
+    if not name:
+        return None
+    target = _strip_accents(name.strip().lower())
+    for day in ITALIAN_WEEKDAYS:
+        if _strip_accents(day) == target:
+            return day
+    return None
