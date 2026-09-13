@@ -1,228 +1,197 @@
 """
-FLOW: BOOK (creazione di un nuovo appuntamento)
+Adattatore condiviso tra il ConversationContext tipizzato e le funzioni
+esistenti in app/booking/engine.py (che lavorano ancora su dict liberi,
+"collected_data").
 
-Da quando esiste anche reschedule.py, questo file contiene SOLO ciò che
-è davvero specifico di "prenotare": la ricerca disponibilità è condivisa
-(flows/common.run_availability_search), la selezione slot generica pure
-(advance_after_slot_selection). Qui restano: l'ingresso nel flusso e la
-creazione vera e propria alla conferma.
+Questo modulo esiste apposta per essere condiviso da PIÙ domini: la
+ricerca disponibilità e la selezione di uno slot funzionano allo stesso
+modo sia per una prenotazione nuova (booking.py) sia per uno
+spostamento (reschedule.py, quando lo aggiungeremo) - cambia solo cosa
+succede dopo la conferma. Non duplicarlo nei singoli flow.
 
-Nomi delle funzioni allineati con reschedule.py (start_search,
-slot_selected, confirm, reject_confirmation) cosi' il Router puo'
-scegliere il modulo giusto in base a context.operation.type senza
-bisogno di sapere altro (vedi router/routing_table.py).
+Nota: NON tocca app/booking/engine.py. È un ponte a senso unico,
+cosi' l'engine esistente (già collaudato) resta l'unica fonte di verità
+per il calcolo di slot e la scrittura a DB, finché non lo migreremo
+anch'esso.
 """
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
-from zoneinfo import ZoneInfo
-
 from app.booking import engine
-from app.context.models import ConversationContext, ConversationStep, OfferedDay, PendingAction, SystemResult
-from app.flows.common import (
-    advance_after_customer_data,
-    advance_after_slot_selection,
-    build_search_collected_data,
-    find_selected_offered_slot,
-    has_search_criteria,
-    offered_slot_to_engine_dict,
-    run_availability_search,
+from app.context.models import (
+    AvailableSlot,
+    ConversationContext,
+    ConversationStep,
+    OfferedSlot,
+    PendingAction,
+    SystemResult,
 )
-from app.utils.it_dates import today_in_tz
 
 
-def _week_effectively_over(knowledge: dict, tenant: dict, today: date, this_sunday: date) -> bool:
-    """
-    True se mancano meno di 2 ore alla fine degli orari di lavoro
-    rimasti in questa settimana (o se non ne restano proprio) - in
-    quel caso non ha senso dire "questa settimana non c'è
-    disponibilità", si passa direttamente alla prossima.
-    """
-    try:
-        tz = ZoneInfo(tenant.get("timezone") or "Europe/Rome")
-    except Exception:
-        tz = ZoneInfo("Europe/Rome")
-    now = datetime.now(tz)
-
-    latest_end = None
-    for wh in knowledge.get("working_hours") or []:
-        try:
-            day_of_week = int(wh.get("day_of_week", -1))
-        except (TypeError, ValueError):
-            continue
-        if day_of_week < today.isoweekday() or day_of_week > 7:
-            continue
-        wh_date = today + timedelta(days=day_of_week - today.isoweekday())
-        if wh_date > this_sunday:
-            continue
-        end_time = wh.get("end_time")
-        if not end_time:
-            continue
-        try:
-            hh, mm = (int(p) for p in str(end_time)[:5].split(":"))
-        except ValueError:
-            continue
-        candidate_end = datetime(wh_date.year, wh_date.month, wh_date.day, hh, mm, tzinfo=tz)
-        if latest_end is None or candidate_end > latest_end:
-            latest_end = candidate_end
-
-    if latest_end is None:
-        return True  # nessun orario di lavoro rimasto questa settimana
-    return now >= latest_end - timedelta(hours=2)
+def has_search_criteria(context: ConversationContext) -> bool:
+    """L'utente ha già espresso ALMENO un criterio (anche generico, es. 'nessuna preferenza' -> period='any')?"""
+    s = context.search
+    return bool(s.period or s.preferred_weekday or s.date_from or s.preferred_time or s.time_from)
 
 
-def start_search(
+def search_or_ask_preference(
     context: ConversationContext,
     tenant: dict,
     knowledge: dict,
 ) -> tuple[ConversationContext, SystemResult]:
     """
-    Intent BOOK/CHANGE_PREFERENCE -> se il cliente ha già indicato un
-    criterio, cerca direttamente. Altrimenti, invece di chiedere
-    genericamente "quando vorrebbe?", gli mostriamo cosa c'è già
-    disponibile (questa settimana / la prossima), così sceglie da una
-    base concreta invece di dover indovinare cosa rispondere.
+    Punto di ingresso condiviso per "voglio cercare disponibilità":
+    non lancia MAI una ricerca alla cieca. Se non c'è ancora nessun
+    criterio, chiede la preferenza invece di cercare su una finestra
+    aperta di default - identico per BOOK e RESCHEDULE.
     """
-    if has_search_criteria(context):
-        return run_availability_search(context, tenant, knowledge)
-    return show_week_overview(context, tenant, knowledge)
+    if not has_search_criteria(context):
+        context = context.model_copy(deep=True)
+        context.conversation.current_step = ConversationStep.SEARCH_AVAILABILITY
+        context.conversation.pending_action = PendingAction.PROVIDE_DATE
+        return context, SystemResult(success=True, data={"next": "ask_preference"})
+
+    return run_availability_search(context, tenant, knowledge)
 
 
-def show_week_overview(
+def run_availability_search(
     context: ConversationContext,
     tenant: dict,
     knowledge: dict,
 ) -> tuple[ConversationContext, SystemResult]:
+    """
+    Cerca disponibilità e aggiorna il contesto. Identica per BOOK e
+    RESCHEDULE: cambia solo cosa succede DOPO la conferma (create vs
+    update), non come si trovano gli slot.
+    """
     context = context.model_copy(deep=True)
-
-    today = today_in_tz(tenant.get("timezone"))
-    this_monday = today - timedelta(days=today.weekday())
-    this_sunday = this_monday + timedelta(days=6)
-    next_sunday = this_sunday + timedelta(days=7)
-
-    base_data = {
-        "service": context.service.value,
-        "location_id": context.professional.location_id if context.professional else None,
-    }
+    collected_data = build_search_collected_data(context)
 
     try:
-        two_weeks = engine.search_available_days(
-            tenant, knowledge,
-            {**base_data, "preferences": {"date_from": today.isoformat(), "date_to": next_sunday.isoformat()}},
-            max_days=14,
-        )
+        booking_res = engine.search_availability(tenant=tenant, knowledge=knowledge, collected_data=collected_data)
     except Exception as exc:
-        print(f"[flows.booking.show_week_overview] errore ricerca giorni disponibili: {exc!r}")
+        print(f"[flows.common.run_availability_search] errore ricerca disponibilità: {exc!r}")
         return context, SystemResult(success=False, error_code="TECHNICAL_ERROR")
 
-    available_days = two_weeks.get("available_days") or []
-    this_week = [d for d in available_days if d["date"] <= this_sunday.isoformat()]
-    next_week = [d for d in available_days if d["date"] > this_sunday.isoformat()]
+    candidate_slots = booking_res.get("candidate_slots") or []
+    result = booking_res.get("result") or {}
 
-    first_available = None
-    if not this_week and not next_week:
-        try:
-            wide = engine.search_available_days(tenant, knowledge, {**base_data, "preferences": {}}, max_days=1)
-        except Exception as exc:
-            print(f"[flows.booking.show_week_overview] errore ricerca prima disponibilità: {exc!r}")
-            return context, SystemResult(success=False, error_code="TECHNICAL_ERROR")
-        wide_days = wide.get("available_days") or []
-        first_available = wide_days[0] if wide_days else None
+    if not candidate_slots:
+        previous_alternatives = bool(context.offered_slots)  # non li cancelliamo: restano validi
+        error_code = "NO_SLOTS_FOUND"
+        if result.get("is_studio_closed"):
+            error_code = "STUDIO_CLOSED"
+        elif result.get("is_studio_full"):
+            error_code = "STUDIO_FULL"
+        return context, SystemResult(
+            success=False, error_code=error_code,
+            data={**result, "previous_alternatives": previous_alternatives},
+        )
 
-    context.conversation.current_step = ConversationStep.SEARCH_AVAILABILITY
-    context.conversation.pending_action = PendingAction.PROVIDE_DATE
-
-    shown_days = (this_week[:3] + next_week[:3]) if (this_week or next_week) else []
-    context.offered_days = [
-        OfferedDay(option=i, date=date.fromisoformat(d["date"]), label=d["label"])
-        for i, d in enumerate(shown_days, start=1)
-    ]
+    context.offered_slots = slots_to_offered(candidate_slots)
+    context.conversation.current_step = ConversationStep.WAITING_FOR_SLOT
+    context.conversation.pending_action = PendingAction.NONE
 
     return context, SystemResult(
         success=True,
-        data={
-            "this_week": this_week[:3],
-            "next_week": next_week[:3],
-            "first_available": first_available,
-            "this_week_over": _week_effectively_over(knowledge, tenant, today, this_sunday),
-        },
+        # Solo il conteggio, MAI le date/orari: l'AI non deve poter
+        # riscrivere la lista con le sue parole. La lista vera la
+        # mostra format_helpers.py in modo deterministico.
+        data={"slots_count": len(context.offered_slots)},
     )
 
 
-def slot_selected(context: ConversationContext, **_ignored) -> tuple[ConversationContext, SystemResult]:
-    """Intent SELECT_SLOT -> passo generico: chiede il nome se manca, altrimenti chiede conferma."""
-    if find_selected_offered_slot(context) is None:
-        return context, SystemResult(success=False, error_code="SLOT_NOT_RECOGNIZED")
-    return advance_after_slot_selection(context)
+def build_search_collected_data(context: ConversationContext) -> dict:
+    """Converte SearchCriteria + service nel dict "preferences" atteso da engine._compute_search_window."""
+    search = context.search
+    return {
+        "service": context.service.value,
+        "location_id": context.professional.location_id if context.professional else None,
+        "preferences": {
+            "period": search.period,
+            "weekday": search.preferred_weekday,
+            "week_part": search.week_part,
+            "date_from": search.date_from.isoformat() if search.date_from else None,
+            "date_to": search.date_to.isoformat() if search.date_to else None,
+            "date": search.preferred_date.isoformat() if search.preferred_date else None,
+            "time_preference": search.time_preference,
+            "exact_time": search.preferred_time.strftime("%H:%M") if search.preferred_time else None,
+        },
+    }
 
 
-def customer_data_provided(context: ConversationContext, **_ignored) -> tuple[ConversationContext, SystemResult]:
-    """Step: COLLECTING_CUSTOMER_DATA + intent PROVIDE_DATA -> passo generico."""
-    return advance_after_customer_data(context)
+def slots_to_offered(candidate_slots: list[dict]) -> list[OfferedSlot]:
+    """
+    Numera gli slot trovati dall'engine (1, 2, 3...) cosi' che "il
+    secondo" o "2" nel messaggio dell'utente sia deterministicamente
+    risolvibile dal Context Manager (vedi _apply_slot_selection).
+
+    Limitati a 3: cosi' possiamo mostrarli SEMPRE come bottoni WhatsApp
+    (visibili subito in chat), senza mai dover ricorrere alla lista
+    nascosta (che richiede un tap in più per aprirsi).
+    """
+    offered = []
+    for i, raw in enumerate(candidate_slots[:3], start=1):
+        slot_id = f"{raw['date']}_{raw['time']}"
+        offered.append(
+            OfferedSlot(
+                option=i,
+                slot=AvailableSlot.model_validate(
+                    {"id": slot_id, "date": raw["date"], "time": raw["time"]}
+                ),
+            )
+        )
+    return offered
 
 
-def confirm(
-    context: ConversationContext,
-    tenant: dict,
-    knowledge: dict,
-) -> tuple[ConversationContext, SystemResult]:
-    """Intent CONFIRM -> crea davvero l'appuntamento."""
+def offered_slot_to_engine_dict(offered: OfferedSlot) -> dict:
+    """Ricostruisce la forma dict ("selected_slot") che create_booking si aspetta, a partire dallo slot scelto."""
+    date_str = offered.slot.date.isoformat()
+    time_str = offered.slot.time.strftime("%H:%M")
+    return {
+        "date": date_str,
+        "time": time_str,
+        "datetime": f"{date_str}T{time_str}",
+    }
+
+
+def find_selected_offered_slot(context: ConversationContext) -> OfferedSlot | None:
+    if not context.booking.slot_id:
+        return None
+    return next(
+        (o for o in context.offered_slots if o.slot.id == context.booking.slot_id),
+        None,
+    )
+
+
+def advance_after_slot_selection(context: ConversationContext) -> tuple[ConversationContext, SystemResult]:
+    """
+    Passo generico, riusabile da qualunque dominio: dopo che l'utente ha
+    scelto uno slot (gia' registrato in context.booking.slot_id dal
+    Context Manager), si chiede SEMPRE il nome dell'intestatario prima
+    di procedere alla conferma - anche se il cliente è già noto da una
+    prenotazione precedente, cosi' c'e' sempre un passaggio esplicito
+    di conferma tra "slot scelto" e "prenotazione creata".
+    """
     context = context.model_copy(deep=True)
 
-    offered = find_selected_offered_slot(context)
-    if offered is None:
-        return context, SystemResult(success=False, error_code="NO_SLOT_SELECTED")
+    context.conversation.current_step = ConversationStep.COLLECTING_CUSTOMER_DATA
+    context.conversation.pending_action = PendingAction.PROVIDE_NAME
+    context.confirmation.required = False
+    return context, SystemResult(success=True, data={"next": "ask_name"})
+
+
+def advance_after_customer_data(context: ConversationContext) -> tuple[ConversationContext, SystemResult]:
+    """Generico quanto sopra: una volta ottenuto il nome, si passa alla conferma."""
+    context = context.model_copy(deep=True)
 
     if not (context.customer.full_name.value or "").strip():
-        # Non dovrebbe succedere (il Router arriva qui solo dopo
-        # COLLECTING_CUSTOMER_DATA), ma se succede è meglio un errore
-        # chiaro che un tentativo di creazione destinato a fallire.
-        context.conversation.current_step = ConversationStep.COLLECTING_CUSTOMER_DATA
+        # Il dato non e' ancora arrivato (il messaggio non lo conteneva):
+        # restiamo nello stesso step, il Router ripropone la domanda.
         return context, SystemResult(success=False, error_code="MISSING_CUSTOMER_NAME")
 
-    collected_data = build_search_collected_data(context)
-    collected_data["selected_slot"] = offered_slot_to_engine_dict(offered)
-    collected_data["person_name"] = context.customer.full_name.value
-
-    context.conversation.current_step = ConversationStep.EXECUTING
-
-    try:
-        booking_res = engine.create_booking(
-            tenant=tenant,
-            knowledge=knowledge,
-            collected_data=collected_data,
-            customer={"id": context.customer.id} if context.customer.id else None,
-            phone_number=context.customer.phone.value,
-        )
-    except Exception as exc:
-        print(f"[flows.booking.confirm] errore creazione appuntamento: {exc!r}")
-        return context, SystemResult(success=False, error_code="TECHNICAL_ERROR")
-
-    result = booking_res.get("result") or {}
-
-    if not result.get("success"):
-        error = result.get("error") or "UNKNOWN_ERROR"
-        # Torniamo a proporre lo slot: l'utente potrà scegliere un'altra opzione.
-        context.conversation.current_step = ConversationStep.WAITING_FOR_SLOT
-        context.booking.status = context.booking.status.__class__.FAILED
-        return context, SystemResult(success=False, error_code=error.upper(), data=result)
-
-    context.booking.id = result.get("appointment_id")
-    context.booking.status = context.booking.status.__class__.CONFIRMED
-    context.conversation.current_step = ConversationStep.COMPLETED
-    context.conversation.pending_action = PendingAction.NONE
-    context.confirmation.required = False
-
-    return context, SystemResult(success=True, data={"appointment_id": context.booking.id})
-
-
-def reject_confirmation(context: ConversationContext, **_ignored) -> tuple[ConversationContext, SystemResult]:
-    """Intent REJECT -> torna a proporre gli slot già trovati."""
-    context = context.model_copy(deep=True)
-    context.booking.slot_id = None
-    context.confirmation.required = False
-    context.confirmation.status = None
-    context.conversation.current_step = ConversationStep.WAITING_FOR_SLOT
-    context.conversation.pending_action = PendingAction.NONE
-    return context, SystemResult(success=True, data={"next": "reask_slot"})
+    context.conversation.current_step = ConversationStep.WAITING_FOR_CONFIRMATION
+    context.conversation.pending_action = PendingAction.CONFIRM
+    context.confirmation.required = True
+    context.confirmation.confirmation_type = "booking"
+    return context, SystemResult(success=True, data={"next": "ask_confirmation"})
