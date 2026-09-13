@@ -33,6 +33,7 @@ from app.ai.responder import compose_final_message, run_ai2_responder
 from app.ai.response_type_resolver import resolve_response_type
 from app.context.context_manager import apply_ai1_result
 from app.context.models import ConversationContext, Intent, Message, ResponseType, SystemResult
+from app.flows.common import find_selected_offered_slot
 from app.router.intent_router import route
 from app.utils.it_dates import today_in_tz
 
@@ -99,6 +100,17 @@ def handle_message(
         # dall'AI. Sequenza di 1-2 messaggi (questa settimana / prossima).
         today = today_in_tz(tenant.get("timezone"))
         outgoing = OutgoingMessage(texts=format_week_overview(system_result.data, today))
+    elif response_type in (ResponseType.BOOKING_CONFIRMED, ResponseType.RESCHEDULE_CONFIRMED) and context.booking.slot_id:
+        # Riepilogo finale: nome + data/ora, MAI l'ID tecnico
+        # dell'appuntamento (non significa nulla per il cliente).
+        offered = find_selected_offered_slot(context)
+        if offered:
+            verb = "spostato" if response_type == ResponseType.RESCHEDULE_CONFIRMED else "fissato"
+            outgoing = OutgoingMessage(
+                texts=[format_booking_summary(context.customer.full_name.value, offered, verb)]
+            )
+        else:
+            outgoing = OutgoingMessage(texts=["L'appuntamento è stato confermato con successo."])
     else:
         # Solo i messaggi dell'UTENTE, mai le risposte precedenti del bot:
         # quelle potevano contenere liste di slot scritte in un turno precedente,
@@ -117,20 +129,11 @@ def handle_message(
         )
 
         if response_type == ResponseType.SHOW_AVAILABILITY and context.offered_slots:
-            # Con 3 opzioni o meno usiamo bottoni (visibili subito in
-            # chat, senza dover aprire nulla); solo con più opzioni
-            # serve per forza la lista nascosta (WhatsApp non permette
-            # più di 3 bottoni).
-            if len(context.offered_slots) <= 3:
-                rows = build_offered_slots_rows(context.offered_slots)
-                slot_buttons = [(r["id"], r["title"]) for r in rows]
-                outgoing = OutgoingMessage(texts=[ai2.message], buttons=slot_buttons)
-            else:
-                outgoing = OutgoingMessage(
-                    texts=[ai2.message],
-                    list_button_label="Scegli orario",
-                    list_rows=build_offered_slots_rows(context.offered_slots),
-                )
+            # Max 3 slot sempre garantiti (slots_to_offered li limita):
+            # bottoni visibili subito in chat, mai la lista nascosta.
+            rows = build_offered_slots_rows(context.offered_slots)
+            slot_buttons = [(r["id"], r["title"]) for r in rows]
+            outgoing = OutgoingMessage(texts=[ai2.message], buttons=slot_buttons)
         elif response_type in _YES_NO_RESPONSE_TYPES:
             outgoing = OutgoingMessage(texts=[ai2.message], buttons=yes_no_buttons())
         else:
