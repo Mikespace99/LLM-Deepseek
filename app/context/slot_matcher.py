@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 
 from app.context.models import OfferedSlot
-from app.utils.it_dates import ITALIAN_WEEKDAYS
+from app.utils.it_dates import ITALIAN_WEEKDAYS, normalize_weekday
 
 # Un numero isolato a inizio messaggio ("1", "3 ore 10", "2 va bene") è quasi
 # sempre la scelta di un'opzione numerata: lo riconosciamo qui in modo
@@ -87,7 +87,7 @@ def match_offered_slot(
     if slot_number is not None:
         return next((o for o in offered_slots if o.option == int(slot_number)), None)
 
-    weekday = (entities.get("weekday") or "").strip().lower()
+    weekday = normalize_weekday(entities.get("weekday"))
     exact_time = entities.get("exact_time")
     exact_date = entities.get("date_from")
 
