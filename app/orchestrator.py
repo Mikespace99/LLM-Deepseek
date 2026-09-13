@@ -21,7 +21,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from app.ai.context_summary import build_ai1_input
-from app.ai.format_helpers import build_offered_slots_rows, format_appointment_target_question, format_week_overview, yes_no_buttons
+from app.ai.format_helpers import (
+    build_offered_slots_rows,
+    format_appointment_target_question,
+    format_booking_summary,
+    format_week_overview,
+    yes_no_buttons,
+)
 from app.ai.interpreter import run_ai1_interpreter
 from app.ai.responder import compose_final_message, run_ai2_responder
 from app.ai.response_type_resolver import resolve_response_type
@@ -111,14 +117,20 @@ def handle_message(
         )
 
         if response_type == ResponseType.SHOW_AVAILABILITY and context.offered_slots:
-            # Lista interattiva: il testo dell'AI resta solo l'introduzione,
-            # gli orari li mostriamo come righe scelte dall'utente col dito,
-            # non più come lista scritta (né dall'AI né in chiaro).
-            outgoing = OutgoingMessage(
-                texts=[ai2.message],
-                list_button_label="Scegli orario",
-                list_rows=build_offered_slots_rows(context.offered_slots),
-            )
+            # Con 3 opzioni o meno usiamo bottoni (visibili subito in
+            # chat, senza dover aprire nulla); solo con più opzioni
+            # serve per forza la lista nascosta (WhatsApp non permette
+            # più di 3 bottoni).
+            if len(context.offered_slots) <= 3:
+                rows = build_offered_slots_rows(context.offered_slots)
+                slot_buttons = [(r["id"], r["title"]) for r in rows]
+                outgoing = OutgoingMessage(texts=[ai2.message], buttons=slot_buttons)
+            else:
+                outgoing = OutgoingMessage(
+                    texts=[ai2.message],
+                    list_button_label="Scegli orario",
+                    list_rows=build_offered_slots_rows(context.offered_slots),
+                )
         elif response_type in _YES_NO_RESPONSE_TYPES:
             outgoing = OutgoingMessage(texts=[ai2.message], buttons=yes_no_buttons())
         else:
