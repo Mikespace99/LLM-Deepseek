@@ -139,7 +139,7 @@ def list_upcoming_for_customer(
     today = date.today().isoformat()
     res = (
         sb.table("appointments")
-        .select("id, appointment_date, appointment_time, duration_minutes, service, service_id")
+        .select("id, appointment_date, appointment_time, duration_minutes, service, service_id, person_name")
         .eq("tenant_id", tenant_id)
         .eq("customer_id", customer_id)
         .eq("status", "confirmed")
