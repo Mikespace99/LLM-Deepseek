@@ -64,6 +64,7 @@ def identify_target(
         # Scope attuale: nessuna disambiguazione automatica ancora.
         context.appointments = [
             Appointment(id=r["id"], date=r["appointment_date"], time=r["appointment_time"],
+                        person_name=r.get("person_name"),
                         status=context.booking.status.__class__.CONFIRMED)
             for r in rows
         ]
@@ -75,6 +76,7 @@ def identify_target(
     context.operation.target_appointment_id = target["id"]
     context.appointments = [
         Appointment(id=target["id"], date=target["appointment_date"], time=target["appointment_time"],
+                    person_name=target.get("person_name"),
                     status=context.booking.status.__class__.CONFIRMED)
     ]
     if not context.service.value and target.get("service"):
