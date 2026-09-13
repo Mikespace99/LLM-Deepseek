@@ -68,7 +68,6 @@ def handle_message(
 ) -> tuple[ConversationContext, OutgoingMessage]:
     # 1. AI#1: interpreta (solo il blocco minimo, non l'intero context)
     ai1 = run_ai1_interpreter(message_text, build_ai1_input(context), tenant.get("timezone"))
-    print(f"[DIAGNOSTICA AI1] intent={ai1.intent} entities={ai1.entities} needs_clarification={ai1.needs_clarification} reason={ai1.clarification_reason}")
 
     # 2. Context Manager: aggiorna lo stato
     context = apply_ai1_result(context, ai1, message_text)
@@ -91,9 +90,12 @@ def handle_message(
         # Caso speciale: la domanda contiene una data/ora/nome reali,
         # quindi la componiamo in modo deterministico invece di farla
         # scrivere ad AI#2 - stesso motivo per cui non le facciamo mai
-        # scrivere gli slot proposti.
+        # scrivere gli slot proposti. Il nome è SEMPRE quello salvato
+        # su questo specifico appuntamento (person_name), mai il nome
+        # generico del cliente: lo stesso numero può avere appuntamenti
+        # intestati a persone diverse.
         outgoing = OutgoingMessage(
-            texts=[format_appointment_target_question(context.appointments[0], context.customer.full_name.value)],
+            texts=[format_appointment_target_question(context.appointments[0], context.appointments[0].person_name)],
             buttons=yes_no_buttons(),
         )
     elif response_type == ResponseType.SHOW_WEEK_OVERVIEW:
@@ -104,12 +106,20 @@ def handle_message(
     elif response_type in (ResponseType.BOOKING_CONFIRMED, ResponseType.RESCHEDULE_CONFIRMED) and context.booking.slot_id:
         # Riepilogo finale: nome + data/ora, MAI l'ID tecnico
         # dell'appuntamento (non significa nulla per il cliente).
+        # Per RESCHEDULE il nome è quello dell'appuntamento spostato
+        # (person_name), non necessariamente quello dell'attuale
+        # interlocutore; per una nuova prenotazione è il nome appena
+        # fornito in questa conversazione.
         offered = find_selected_offered_slot(context)
         if offered:
-            verb = "spostato" if response_type == ResponseType.RESCHEDULE_CONFIRMED else "fissato"
-            outgoing = OutgoingMessage(
-                texts=[format_booking_summary(context.customer.full_name.value, offered, verb)]
+            is_reschedule = response_type == ResponseType.RESCHEDULE_CONFIRMED
+            verb = "spostato" if is_reschedule else "fissato"
+            name = (
+                (context.appointments[0].person_name if context.appointments else None)
+                if is_reschedule
+                else context.customer.full_name.value
             )
+            outgoing = OutgoingMessage(texts=[format_booking_summary(name, offered, verb)])
         else:
             outgoing = OutgoingMessage(texts=["L'appuntamento è stato confermato con successo."])
     else:
