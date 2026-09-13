@@ -49,9 +49,14 @@ _INTENT_TO_OPERATION = {
 }
 
 # Intent che portano nuove/aggiornate preferenze di ricerca (data/ora).
+# Intent che portano nuove/aggiornate preferenze di ricerca (data/ora).
+# RESCHEDULE NON c'è apposta: nel messaggio che avvia lo spostamento,
+# un riferimento a una data ("l'appuntamento della prossima settimana")
+# descrive quasi sempre QUALE appuntamento esistente spostare, non
+# QUANDO vuole il nuovo - quello lo esprime solo DOPO aver confermato
+# il target, con un messaggio successivo classificato CHANGE_PREFERENCE.
 _SEARCH_RELEVANT_INTENTS = {
     Intent.BOOK,
-    Intent.RESCHEDULE,
     Intent.CHANGE_PREFERENCE,
 }
 
