@@ -1014,6 +1014,29 @@ def create_booking(
             },
         }
 
+    customer_id = customer.get("id") if customer else None
+    person_name = (ctx.get("person_name") or "").strip()
+
+    if customer_id:
+        # Un numero può prenotare per al massimo 2 persone diverse
+        # (es. marito e moglie sullo stesso telefono); oltre, è più
+        # probabile un uso improprio che un caso legittimo.
+        try:
+            existing_names = appointment_repo.list_person_names_for_customer(ctx["tenant_id"], customer_id)
+        except Exception as exc:
+            print(f"[create_booking] errore lettura nomi esistenti: {exc!r}")
+            existing_names = []
+
+        is_new_name = person_name and person_name.lower() not in {n.lower() for n in existing_names}
+        if is_new_name and len(existing_names) >= 2:
+            return {
+                "selected_slot": slot,
+                "result": {
+                    "success": False,
+                    "error": "too_many_names_for_phone",
+                },
+            }
+
     try:
         row = appointment_repo.create_appointment(
             tenant_id=ctx["tenant_id"],
@@ -1021,11 +1044,7 @@ def create_booking(
             appointment_time=slot["time"],
             duration_minutes=ctx["block_minutes"],
             source="whatsapp",
-            customer_id=(
-                customer.get("id")
-                if customer
-                else None
-            ),
+            customer_id=customer_id,
             phone_number=phone_number,
             service=ctx["service_name"],
             service_id=ctx.get("service_id"),
@@ -1034,18 +1053,21 @@ def create_booking(
                 or ctx.get("location_id")
             ),
             status="confirmed",
+            person_name=person_name or None,
         )
 
-        customer_id = customer.get("id") if customer else None
-        if customer_id and ctx.get("person_name"):
-            # Il nome era richiesto come obbligatorio per prenotare ma
-            # non veniva mai salvato: lo scriviamo sull'anagrafica del
-            # cliente, cosi' compare anche in Agenda (che mostra
-            # customers.full_name) e non va richiesto di nuovo la
-            # prossima volta. Non deve mai far fallire una prenotazione
-            # gia' andata a buon fine.
+        if customer_id and person_name:
+            # L'anagrafica cliente si aggiorna SOLO se non ha ancora un
+            # nome (prima prenotazione di questo numero): non va più
+            # sovrascritta ad ogni prenotazione, altrimenti un numero
+            # che prenota per due persone diverse perderebbe il nome
+            # della prima ad ogni nuova prenotazione della seconda. Il
+            # nome del SINGOLO appuntamento è già salvato sopra, sulla
+            # riga stessa (person_name).
             try:
-                customer_repo.update_customer_name(ctx["tenant_id"], customer_id, ctx["person_name"])
+                existing_customer = customer_repo.get_customer(ctx["tenant_id"], customer_id)
+                if not (existing_customer or {}).get("full_name"):
+                    customer_repo.update_customer_name(ctx["tenant_id"], customer_id, person_name)
             except Exception as name_exc:
                 print(f"[create_booking] impossibile salvare il nome sul cliente: {name_exc!r}")
 
