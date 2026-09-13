@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 
 from app.context.models import OfferedSlot
-from app.utils.it_dates import ITALIAN_WEEKDAYS, normalize_weekday
+from app.utils.it_dates import ITALIAN_WEEKDAYS
 
 # Un numero isolato a inizio messaggio ("1", "3 ore 10", "2 va bene") è quasi
 # sempre la scelta di un'opzione numerata: lo riconosciamo qui in modo
@@ -30,13 +30,12 @@ from app.utils.it_dates import ITALIAN_WEEKDAYS, normalize_weekday
 _LEADING_NUMBER = re.compile(r"^\s*(\d{1,2})\b")
 
 # Formato ESATTO usato da build_offered_slots_rows per il titolo di un
-# bottone/riga lista ("Lunedì 09:00"). Quando l'utente tocca un nostro
+# bottone/riga lista ("14/09 09:00"). Quando l'utente tocca un nostro
 # bottone, il testo che torna indietro è ESATTAMENTE questo: lo
 # riconosciamo qui in modo diretto, senza passare per AI#1 - zero
 # rischio di interpretazione, perché il formato lo decidiamo noi.
 _ROW_TITLE_PATTERN = re.compile(
-    r"^\s*(lunedì|martedì|mercoledì|giovedì|venerdì|sabato|domenica)\s+(\d{1,2}):(\d{2})\s*$",
-    re.IGNORECASE,
+    r"^\s*(\d{1,2})/(\d{1,2})\s+(\d{1,2}):(\d{2})\s*$",
 )
 
 
@@ -46,11 +45,11 @@ def _match_row_title(message_text: str, offered_slots: list[OfferedSlot]) -> Off
     m = _ROW_TITLE_PATTERN.match(message_text)
     if not m:
         return None
-    weekday, hh, mm = m.group(1).lower(), int(m.group(2)), int(m.group(3))
+    day, month, hh, mm = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
     return next(
         (
             o for o in offered_slots
-            if ITALIAN_WEEKDAYS[o.slot.date.isoweekday() % 7] == weekday
+            if o.slot.date.day == day and o.slot.date.month == month
             and o.slot.time.hour == hh and o.slot.time.minute == mm
         ),
         None,
@@ -87,7 +86,7 @@ def match_offered_slot(
     if slot_number is not None:
         return next((o for o in offered_slots if o.option == int(slot_number)), None)
 
-    weekday = normalize_weekday(entities.get("weekday"))
+    weekday = (entities.get("weekday") or "").strip().lower()
     exact_time = entities.get("exact_time")
     exact_date = entities.get("date_from")
 
