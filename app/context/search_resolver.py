@@ -25,6 +25,8 @@ from datetime import date, timedelta
 
 from app.context.models import SearchCriteria
 
+from app.utils.it_dates import normalize_weekday
+
 _WEEKDAY_NAME_TO_ISO = {
     "lunedì": 1,
     "martedì": 2,
@@ -59,7 +61,8 @@ def _resolve_weekday_date(
     2) Se non la trova li', cerca la prossima occorrenza futura entro
        l'orizzonte di ricerca.
     """
-    target_iso = _WEEKDAY_NAME_TO_ISO.get((weekday_name or "").strip().lower())
+    
+    target_iso = _WEEKDAY_NAME_TO_ISO.get(normalize_weekday(weekday_name))
     if not target_iso:
         return None
 
@@ -106,8 +109,8 @@ def resolve_search_criteria(
         updated.week_part = entities["week_part"]
 
     if entities.get("weekday"):
-        updated.preferred_weekday = entities["weekday"]
-
+        updated.preferred_weekday = normalize_weekday(entities["weekday"]) or entities["weekday"]
+      
     if entities.get("time_preference"):
         updated.time_preference = entities["time_preference"]
 
