@@ -447,7 +447,11 @@ def _appointment_to_event(row: dict, tz_name: str) -> dict:
     if source == "block":
         title = row.get("notes") or "Bloccato"
     else:
-        cust_name = customer.get("full_name") or row.get("phone_number") or "Cliente"
+        # L'intestatario di QUESTO appuntamento (person_name) ha
+        # priorità sul nome generico del cliente: un numero può
+        # prenotare per persone diverse, e ogni appuntamento deve
+        # mostrare la persona giusta, non sempre l'ultima salvata.
+        cust_name = row.get("person_name") or customer.get("full_name") or row.get("phone_number") or "Cliente"
         svc_name = service.get("name") or row.get("service") or ""
         title = f"{cust_name} – {svc_name}" if svc_name else cust_name
 
