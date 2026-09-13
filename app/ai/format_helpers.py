@@ -50,10 +50,12 @@ def format_appointment_target_question(appointment, customer_name: str | None = 
 
 def build_offered_slots_rows(offered_slots: list[OfferedSlot]) -> list[dict]:
     """
-    Righe per la lista interattiva WhatsApp - stessi dati di
-    format_offered_slots, ma come struttura invece che testo. Titolo
-    "Giorno HH:MM" (univoco anche se più giorni condividono lo stesso
-    orario), descrizione con la data estesa.
+    Righe per bottoni/lista interattiva WhatsApp. Titolo "GG/MM HH:MM"
+    (es. "14/09 09:00"): un bottone ha solo 20 caratteri disponibili,
+    troppo pochi per "Lunedì 14 settembre alle 09:00" - ma la data
+    numerica basta a non lasciare ambiguità su quale settimana/giorno,
+    a differenza del solo nome del giorno. La descrizione (solo per la
+    lista, se mai servisse) riporta la forma estesa.
     """
     rows = []
     for offered in offered_slots[:10]:  # WhatsApp: max 10 righe totali
@@ -63,8 +65,8 @@ def build_offered_slots_rows(offered_slots: list[OfferedSlot]) -> list[dict]:
         time_str = offered.slot.time.strftime("%H:%M")
         rows.append({
             "id": f"slot_{offered.option}",
-            "title": f"{weekday} {time_str}",
-            "description": f"{d.day} {month}",
+            "title": f"{d.day:02d}/{d.month:02d} {time_str}",
+            "description": f"{weekday} {d.day} {month}",
         })
     return rows
 
