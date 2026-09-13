@@ -98,6 +98,9 @@ COME SCRIVERE IN BASE A response_type:
     RESCHEDULE_TARGET_REJECTED -> l'unico appuntamento trovato non era quello
       giusto: scusati e invita a contattare direttamente lo studio per
       individuarlo insieme.
+    TOO_MANY_NAMES_FOR_PHONE -> per questo numero risultano già due persone
+      diverse con appuntamenti attivi: spiega gentilmente che per una terza
+      persona serve contattare direttamente lo studio.
     TECHNICAL_ERROR -> scusati per un problema tecnico, invita a riprovare
       tra poco.
     Per qualunque altro error_code non elencato, scusati in modo generico e
