@@ -4,8 +4,7 @@ import datetime
 from datetime import date, timedelta
 
 from app.context.models import OfferedDay
-from app.utils.it_dates import ITALIAN_WEEKDAYS
-
+from app.utils.it_dates import ITALIAN_WEEKDAYS, normalize_weekday
 
 def match_offered_day(entities: dict, offered_days: list[OfferedDay], today: date) -> OfferedDay | None:
     """
@@ -42,7 +41,7 @@ def match_offered_day(entities: dict, offered_days: list[OfferedDay], today: dat
         return by_date[target_date]
 
     # 2. Gestione del nome del giorno (es. "venerdì")
-    weekday = (entities.get("weekday") or "").strip().lower()
+    weekday = normalize_weekday(entities.get("weekday"))
     if weekday:
         matches = [
             od for od in offered_days
