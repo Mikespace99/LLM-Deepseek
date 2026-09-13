@@ -15,8 +15,8 @@ bisogno di sapere altro (vedi router/routing_table.py).
 
 from __future__ import annotations
 
-import traceback
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from app.booking import engine
 from app.context.models import ConversationContext, ConversationStep, OfferedDay, PendingAction, SystemResult
@@ -30,6 +30,46 @@ from app.flows.common import (
     run_availability_search,
 )
 from app.utils.it_dates import today_in_tz
+
+
+def _week_effectively_over(knowledge: dict, tenant: dict, today: date, this_sunday: date) -> bool:
+    """
+    True se mancano meno di 2 ore alla fine degli orari di lavoro
+    rimasti in questa settimana (o se non ne restano proprio) - in
+    quel caso non ha senso dire "questa settimana non c'è
+    disponibilità", si passa direttamente alla prossima.
+    """
+    try:
+        tz = ZoneInfo(tenant.get("timezone") or "Europe/Rome")
+    except Exception:
+        tz = ZoneInfo("Europe/Rome")
+    now = datetime.now(tz)
+
+    latest_end = None
+    for wh in knowledge.get("working_hours") or []:
+        try:
+            day_of_week = int(wh.get("day_of_week", -1))
+        except (TypeError, ValueError):
+            continue
+        if day_of_week < today.isoweekday() or day_of_week > 7:
+            continue
+        wh_date = today + timedelta(days=day_of_week - today.isoweekday())
+        if wh_date > this_sunday:
+            continue
+        end_time = wh.get("end_time")
+        if not end_time:
+            continue
+        try:
+            hh, mm = (int(p) for p in str(end_time)[:5].split(":"))
+        except ValueError:
+            continue
+        candidate_end = datetime(wh_date.year, wh_date.month, wh_date.day, hh, mm, tzinfo=tz)
+        if latest_end is None or candidate_end > latest_end:
+            latest_end = candidate_end
+
+    if latest_end is None:
+        return True  # nessun orario di lavoro rimasto questa settimana
+    return now >= latest_end - timedelta(hours=2)
 
 
 def start_search(
@@ -74,7 +114,6 @@ def show_week_overview(
         )
     except Exception as exc:
         print(f"[flows.booking.show_week_overview] errore ricerca giorni disponibili: {exc!r}")
-        traceback.print_exc()
         return context, SystemResult(success=False, error_code="TECHNICAL_ERROR")
 
     available_days = two_weeks.get("available_days") or []
@@ -87,7 +126,6 @@ def show_week_overview(
             wide = engine.search_available_days(tenant, knowledge, {**base_data, "preferences": {}}, max_days=1)
         except Exception as exc:
             print(f"[flows.booking.show_week_overview] errore ricerca prima disponibilità: {exc!r}")
-            traceback.print_exc()
             return context, SystemResult(success=False, error_code="TECHNICAL_ERROR")
         wide_days = wide.get("available_days") or []
         first_available = wide_days[0] if wide_days else None
@@ -103,7 +141,12 @@ def show_week_overview(
 
     return context, SystemResult(
         success=True,
-        data={"this_week": this_week[:3], "next_week": next_week[:3], "first_available": first_available},
+        data={
+            "this_week": this_week[:3],
+            "next_week": next_week[:3],
+            "first_available": first_available,
+            "this_week_over": _week_effectively_over(knowledge, tenant, today, this_sunday),
+        },
     )
 
 
@@ -154,7 +197,6 @@ def confirm(
         )
     except Exception as exc:
         print(f"[flows.booking.confirm] errore creazione appuntamento: {exc!r}")
-        traceback.print_exc()
         return context, SystemResult(success=False, error_code="TECHNICAL_ERROR")
 
     result = booking_res.get("result") or {}
