@@ -125,9 +125,13 @@ def slots_to_offered(candidate_slots: list[dict]) -> list[OfferedSlot]:
     Numera gli slot trovati dall'engine (1, 2, 3...) cosi' che "il
     secondo" o "2" nel messaggio dell'utente sia deterministicamente
     risolvibile dal Context Manager (vedi _apply_slot_selection).
+
+    Limitati a 3: cosi' possiamo mostrarli SEMPRE come bottoni WhatsApp
+    (visibili subito in chat), senza mai dover ricorrere alla lista
+    nascosta (che richiede un tap in più per aprirsi).
     """
     offered = []
-    for i, raw in enumerate(candidate_slots, start=1):
+    for i, raw in enumerate(candidate_slots[:3], start=1):
         slot_id = f"{raw['date']}_{raw['time']}"
         offered.append(
             OfferedSlot(
@@ -164,25 +168,17 @@ def advance_after_slot_selection(context: ConversationContext) -> tuple[Conversa
     """
     Passo generico, riusabile da qualunque dominio: dopo che l'utente ha
     scelto uno slot (gia' registrato in context.booking.slot_id dal
-    Context Manager), decide se servono ancora dati anagrafici o se si
-    puo' passare direttamente alla conferma.
+    Context Manager), si chiede SEMPRE il nome dell'intestatario prima
+    di procedere alla conferma - anche se il cliente è già noto da una
+    prenotazione precedente, cosi' c'e' sempre un passaggio esplicito
+    di conferma tra "slot scelto" e "prenotazione creata".
     """
     context = context.model_copy(deep=True)
-    customer = context.customer
 
-    missing_name = not (customer.full_name.value or "").strip()
-
-    if missing_name:
-        context.conversation.current_step = ConversationStep.COLLECTING_CUSTOMER_DATA
-        context.conversation.pending_action = PendingAction.PROVIDE_NAME
-        context.confirmation.required = False
-        return context, SystemResult(success=True, data={"next": "ask_name"})
-
-    context.conversation.current_step = ConversationStep.WAITING_FOR_CONFIRMATION
-    context.conversation.pending_action = PendingAction.CONFIRM
-    context.confirmation.required = True
-    context.confirmation.confirmation_type = "booking"
-    return context, SystemResult(success=True, data={"next": "ask_confirmation"})
+    context.conversation.current_step = ConversationStep.COLLECTING_CUSTOMER_DATA
+    context.conversation.pending_action = PendingAction.PROVIDE_NAME
+    context.confirmation.required = False
+    return context, SystemResult(success=True, data={"next": "ask_name"})
 
 
 def advance_after_customer_data(context: ConversationContext) -> tuple[ConversationContext, SystemResult]:
