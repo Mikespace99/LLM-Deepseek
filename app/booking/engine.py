@@ -371,8 +371,6 @@ def _compute_search_window(ctx: dict) -> dict:
         }
     )
 
-    print(f"[SEARCH-WINDOW] today={today} from_date={from_date} to_date={to_date} prefs={prefs}")
-
     return ctx
 
 
@@ -858,8 +856,6 @@ def search_availability(
 
     ctx = _compute_search_window(ctx)
 
-    print(f"[DIAGNOSTICA] search_availability interroga: from_date={ctx['from_date']} to_date={ctx['to_date']} preferences={collected_data.get('preferences')}")
-    
     busy_events = (
         appointment_repo.list_busy_for_availability(
             tenant_id=ctx["tenant_id"],
@@ -1165,19 +1161,21 @@ def search_available_days(
 
     available_days = []
     for date_str in sorted(by_date.keys()):
-        slots = by_date[date_str]
-
-        morning = False
-        afternoon = False
-        for s in slots:
-            try:
-                hour = int(str(s.get("time") or "99:99")[:2])
-            except ValueError:
-                continue
-            if hour < 13:
-                morning = True
+        # NON deriviamo mattina/pomeriggio dai primi 3 slot del giorno
+        # (già troncati da _generate_and_filter_slots): se un giorno ha
+        # 3+ slot di mattina, il pomeriggio non verrebbe mai nemmeno
+        # controllato. Due interrogazioni mirate, una per fascia.
+        morning = afternoon = False
+        for period in ("morning", "afternoon"):
+            period_prefs = {"date": date_str, "date_from": date_str, "date_to": date_str, "time_preference": period}
+            period_collected = dict(wide)
+            period_collected["preferences"] = period_prefs
+            period_ctx = _compute_search_window(_build_context(tenant, knowledge, period_collected))
+            period_slots = _generate_and_filter_slots(period_ctx, busy_events).get("candidate_slots") or []
+            if period == "morning":
+                morning = bool(period_slots)
             else:
-                afternoon = True
+                afternoon = bool(period_slots)
 
         try:
             dt = datetime.strptime(date_str[:10], "%Y-%m-%d")
