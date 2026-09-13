@@ -120,8 +120,10 @@ def format_week_overview(data: dict, today: date) -> list[str]:
             for d in this_week
         )
         messages.append(f"Per questa settimana abbiamo le seguenti disponibilità:\n{lines}")
-    else:
+    elif not data.get("this_week_over"):
         messages.append("Per questa settimana non abbiamo disponibilità.")
+    # se this_week_over è True e non ci sono giorni, non diciamo nulla
+    # sulla settimana corrente: si passa direttamente alla prossima.
 
     if next_week:
         lines = "\n".join(f"- {_format_day_with_period(d)}" for d in next_week)
@@ -136,11 +138,28 @@ def format_ack_message(tz_name: str | None = None, now: datetime | None = None) 
     return f"{time_of_day_greeting(tz_name, now)}, un attimo e verifico."
 
 
+def format_booking_summary(customer_name: str | None, offered_slot, verb: str = "fissato") -> str:
+    """
+    Riepilogo finale (nome + data/ora), mai l'ID tecnico
+    dell'appuntamento - che non significa nulla per il cliente.
+    """
+    d = offered_slot.slot.date
+    weekday = ITALIAN_WEEKDAYS[d.isoweekday() % 7]
+    month = ITALIAN_MONTHS[d.month - 1]
+    time_str = offered_slot.slot.time.strftime("%H:%M")
+    intestatario = f" per {customer_name}" if customer_name else ""
+    return f"Perfetto, l'appuntamento{intestatario} è stato {verb}: {weekday} {d.day} {month} alle {time_str}."
+
+
 def time_of_day_greeting(tz_name: str | None = None, now: datetime | None = None) -> str:
     """
     Saluto in base all'orario, calcolato da Python - mai dall'AI, così
     non sbaglia fuso orario o soglie. Usato solo al primo messaggio di
     una conversazione nuova.
+
+    Buongiorno: fino alle 14:00 incluse
+    Buon pomeriggio: dalle 14:01 alle 18:59
+    Buonasera: dalle 19:00 alle 4:59 (passata la mezzanotte compresa)
     """
     if now is None:
         try:
@@ -149,9 +168,11 @@ def time_of_day_greeting(tz_name: str | None = None, now: datetime | None = None
             tz = ZoneInfo("Europe/Rome")
         now = datetime.now(tz)
 
-    hour = now.hour
-    if 5 <= hour < 12:
+    minutes = now.hour * 60 + now.minute
+    if minutes < 5 * 60:
+        return "Buonasera"
+    if minutes <= 14 * 60:
         return "Buongiorno"
-    if 12 <= hour < 18:
+    if minutes < 19 * 60:
         return "Buon pomeriggio"
     return "Buonasera"
