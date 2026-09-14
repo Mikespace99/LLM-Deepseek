@@ -249,9 +249,10 @@ async def statistiche_page(request: Request):
 
 
 @router.get("/logout")
-async def logout_route(response: Response):
-    logout(response)
-    return RedirectResponse("/login", status_code=302)
+async def logout_route():
+    redirect = RedirectResponse("/login", status_code=302)
+    logout(redirect)
+    return redirect
 
 
 # ---------------------------------------------------------------------------
