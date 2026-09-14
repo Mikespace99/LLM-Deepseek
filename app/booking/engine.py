@@ -856,6 +856,8 @@ def search_availability(
 
     ctx = _compute_search_window(ctx)
 
+    print(f"[DIAGNOSTICA] search_availability interroga: from_date={ctx['from_date']} to_date={ctx['to_date']} preferences={collected_data.get('preferences')}")
+
     busy_events = (
         appointment_repo.list_busy_for_availability(
             tenant_id=ctx["tenant_id"],
