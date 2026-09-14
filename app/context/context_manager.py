@@ -203,11 +203,21 @@ def apply_ai1_result(
     _apply_confirmation(context, effective_intent)
 
     if not matched_day and effective_intent in _SEARCH_RELEVANT_INTENTS and _has_search_signal(ai1.entities):
+        # Per RESCHEDULE, "la settimana successiva"/"tra due settimane"
+        # ecc. sono relative alla data dell'APPUNTAMENTO da spostare,
+        # non a oggi: è quello il punto di riferimento naturale per il
+        # cliente ("la settimana dopo quella del mio appuntamento"),
+        # non la data odierna della conversazione.
+        anchor_date = now.date()
+        if context.operation.type == OperationType.RESCHEDULE and context.appointments:
+            anchor_date = context.appointments[0].date
+
         context.search = resolve_search_criteria(
             entities=ai1.entities,
             current=context.search,
-            today=now.date(),
+            today=anchor_date,
             slot_search_days=Config.DEFAULT_SLOT_SEARCH_DAYS,
         )
+        print(f"[DIAGNOSTICA CONTEXT] anchor_date={anchor_date} -> search.date_from={context.search.date_from} search.date_to={context.search.date_to}")
 
     return context
