@@ -778,6 +778,12 @@
         },
       }
     }
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') {
+        window.location.href = '/logout';
+      }
+    });
   </script>
 </body>
 </html>
+    
