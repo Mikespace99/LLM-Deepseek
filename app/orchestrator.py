@@ -68,6 +68,7 @@ def handle_message(
 ) -> tuple[ConversationContext, OutgoingMessage]:
     # 1. AI#1: interpreta (solo il blocco minimo, non l'intero context)
     ai1 = run_ai1_interpreter(message_text, build_ai1_input(context), tenant.get("timezone"))
+    print(f"[DIAGNOSTICA AI1] intent={ai1.intent} entities={ai1.entities} needs_clarification={ai1.needs_clarification} reason={ai1.clarification_reason}")
 
     # 2. Context Manager: aggiorna lo stato
     context = apply_ai1_result(context, ai1, message_text)
