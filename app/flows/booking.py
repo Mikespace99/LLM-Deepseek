@@ -27,9 +27,11 @@ from app.flows.common import (
     find_selected_offered_slot,
     has_search_criteria,
     offered_slot_to_engine_dict,
+    reset_for_new_operation,
     run_availability_search,
 )
 from app.utils.it_dates import today_in_tz
+from app.web.sse import notify_agenda
 
 
 def _week_effectively_over(knowledge: dict, tenant: dict, today: date, this_sunday: date) -> bool:
@@ -84,6 +86,11 @@ def start_search(
     disponibile (questa settimana / la prossima), così sceglie da una
     base concreta invece di dover indovinare cosa rispondere.
     """
+    if context.conversation.current_step == ConversationStep.COMPLETED:
+        # Richiesta nuova dopo una prenotazione già conclusa: si
+        # riparte puliti, senza criteri/slot della volta precedente.
+        context = reset_for_new_operation(context)
+
     if has_search_criteria(context):
         return run_availability_search(context, tenant, knowledge)
     return show_week_overview(context, tenant, knowledge)
@@ -213,6 +220,8 @@ def confirm(
     context.conversation.current_step = ConversationStep.COMPLETED
     context.conversation.pending_action = PendingAction.NONE
     context.confirmation.required = False
+
+    notify_agenda(tenant["id"])
 
     return context, SystemResult(success=True, data={"appointment_id": context.booking.id})
 
