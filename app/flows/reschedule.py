@@ -31,9 +31,11 @@ from app.flows.common import (
     build_search_collected_data,
     find_selected_offered_slot,
     offered_slot_to_engine_dict,
+    reset_for_new_operation,
     search_or_ask_preference,
 )
 from app.repositories import appointment as appointment_repo
+from app.web.sse import notify_agenda
 
 
 def identify_target(
@@ -47,6 +49,11 @@ def identify_target(
     conferma il target, poi si chiede la preferenza (vedi ask_preference).
     """
     context = context.model_copy(deep=True)
+
+    if context.conversation.current_step == ConversationStep.COMPLETED:
+        # Richiesta nuova dopo uno spostamento già concluso: si
+        # riparte puliti, senza target/criteri della volta precedente.
+        context = reset_for_new_operation(context)
 
     if not context.customer.id:
         return context, SystemResult(success=False, error_code="CUSTOMER_NOT_IDENTIFIED")
@@ -169,6 +176,8 @@ def confirm(
     context.conversation.current_step = ConversationStep.COMPLETED
     context.conversation.pending_action = PendingAction.NONE
     context.confirmation.required = False
+
+    notify_agenda(tenant["id"])
 
     return context, SystemResult(success=True, data={"appointment_id": target_id})
 
