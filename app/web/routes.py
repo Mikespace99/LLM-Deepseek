@@ -7,8 +7,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Request, Response, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
+
+from app.web.sse import agenda_event_stream, notify_agenda
 from pydantic import BaseModel, EmailStr, Field
 from typing import Optional
 
@@ -249,10 +251,9 @@ async def statistiche_page(request: Request):
 
 
 @router.get("/logout")
-async def logout_route():
-    redirect = RedirectResponse("/login", status_code=302)
-    logout(redirect)
-    return redirect
+async def logout_route(response: Response):
+    logout(response)
+    return RedirectResponse("/login", status_code=302)
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +313,26 @@ async def api_me(request: Request):
 # ---------------------------------------------------------------------------
 # API Config (onboarding)
 # ---------------------------------------------------------------------------
+
+@router.get("/api/agenda/stream")
+async def api_agenda_stream(request: Request):
+    """
+    Connessione SSE tenuta aperta dalla pagina agenda: il backend
+    avvisa quando qualcosa è cambiato (WhatsApp o dashboard), la pagina
+    ricarica i dati con la normale GET /api/agenda/events. Il browser
+    non parla mai con Supabase direttamente.
+    """
+    user = require_user(request)
+    tenant = get_tenant_by_owner(user["id"])
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Studio non trovato")
+
+    return StreamingResponse(
+        agenda_event_stream(tenant["id"]),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
 
 @router.get("/api/config")
 async def api_get_config(request: Request):
@@ -596,6 +617,7 @@ async def api_agenda_create_appointment(body: AppointmentCreateIn, request: Requ
         raise HTTPException(status_code=500, detail=str(e))
 
     full = appointment_repo.get_appointment(tenant_id, row["id"])
+    notify_agenda(tenant_id)
     return _appointment_to_event(full, tenant.get("timezone") or "Europe/Rome")
 
 
@@ -621,6 +643,7 @@ async def api_agenda_update_appointment(appointment_id: str, body: AppointmentUp
         raise HTTPException(status_code=404, detail="Appuntamento non trovato")
 
     full = appointment_repo.get_appointment(tenant["id"], appointment_id)
+    notify_agenda(tenant["id"])
     return _appointment_to_event(full, tenant.get("timezone") or "Europe/Rome")
 
 
@@ -633,6 +656,7 @@ async def api_agenda_delete_appointment(appointment_id: str, request: Request):
     updated = appointment_repo.cancel_appointment(tenant["id"], appointment_id)
     if not updated:
         raise HTTPException(status_code=404, detail="Appuntamento non trovato")
+    notify_agenda(tenant["id"])
     return {"ok": True}
 
 
