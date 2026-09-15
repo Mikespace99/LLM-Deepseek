@@ -275,6 +275,24 @@
           eventDrop: (info) => this.moveEvent(info),
         });
         this.calendar.render();
+
+        this.initLiveUpdates();
+      },
+
+      initLiveUpdates() {
+        // Il browser parla SOLO col backend, mai con Supabase: quando
+        // arriva un segnale "è cambiato qualcosa" (da WhatsApp o dalla
+        // dashboard), ricarichiamo semplicemente gli eventi visibili
+        // con la stessa chiamata che già usiamo oggi. Se la connessione
+        // cade, il browser la riapre da solo (comportamento nativo di
+        // EventSource) - nessuna gestione manuale della riconnessione.
+        const source = new EventSource('/api/agenda/stream');
+        source.onmessage = () => this.refetch();
+        source.onerror = () => {
+          // Non facciamo nulla: EventSource riprova la connessione da
+          // sola. L'agenda resta comunque utilizzabile nel frattempo,
+          // semplicemente non si aggiorna da sola finché non si riconnette.
+        };
       },
 
       changeView(name) {
