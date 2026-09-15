@@ -20,12 +20,39 @@ from __future__ import annotations
 from app.booking import engine
 from app.context.models import (
     AvailableSlot,
+    Booking,
+    Confirmation,
+    ContextValue,
     ConversationContext,
     ConversationStep,
     OfferedSlot,
     PendingAction,
+    SearchCriteria,
     SystemResult,
 )
+
+
+def reset_for_new_operation(context: ConversationContext) -> ConversationContext:
+    """
+    Ripulisce lo stato "per-operazione" (ricerca, slot proposti,
+    prenotazione, conferma...) quando si riparte da zero dopo che
+    un'operazione precedente si era già conclusa (COMPLETED) - così
+    una nuova richiesta non eredita per sbaglio criteri/slot della
+    prenotazione precedente. NON tocca l'identità del cliente (nome,
+    telefono, id) né context.operation.type/status, già impostati
+    correttamente dal Context Manager per QUESTO nuovo giro.
+    """
+    context = context.model_copy(deep=True)
+    context.search = SearchCriteria()
+    context.service = ContextValue()
+    context.offered_slots = []
+    context.offered_days = []
+    context.booking = Booking()
+    context.confirmation = Confirmation()
+    context.appointments = []
+    context.selected_appointment_id = None
+    context.operation.target_appointment_id = None
+    return context
 
 
 def has_search_criteria(context: ConversationContext) -> bool:
