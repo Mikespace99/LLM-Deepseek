@@ -11,16 +11,22 @@ utenti.
 
 from __future__ import annotations
 
+from app.ai.context_summary import build_ai1_input
 from app.ai.format_helpers import format_ack_message
+from app.ai.interpreter import run_ai1_interpreter
 from app.config import Config
 from app.context import repository as context_repository
-from app.context.models import ConversationStatus
+from app.context.models import ConversationStatus, Intent
 from app.integrations.whatsapp import send_whatsapp_buttons, send_whatsapp_list, send_whatsapp_message
 from app.orchestrator import OutgoingMessage, handle_message
 from app.repositories.customer import get_or_create_customer, normalize_phone
 from app.repositories.tenant import get_tenant_by_whatsapp_number, get_tenant_knowledge
 
 _KNOWLEDGE_TEXT_KEYS = ("services_text", "locations_text", "working_hours_text")
+
+# Intent che non richiedono alcuna verifica (ricerca/lettura dati): un
+# saluto puro non merita un "un attimo, verifico" prima della risposta.
+_CHITCHAT_INTENTS_NO_ACK = {Intent.GREETING, Intent.THANKS}
 
 
 def should_use_new_pipeline(phone: str) -> bool:
@@ -92,12 +98,18 @@ async def handle_whatsapp_message_new_pipeline(
             tenant_id, customer, phone
         )
 
-        # Ack IMMEDIATO, prima ancora di interpellare AI#1/il motore di
-        # ricerca: solo al primo messaggio di una conversazione nuova,
-        # così il cliente sa subito che stiamo verificando, invece di
-        # aspettare in silenzio mentre facciamo la ricerca vera.
+        # Ack IMMEDIATO, prima ancora di avviare la ricerca vera: solo
+        # al primo messaggio di una conversazione nuova, e SOLO se il
+        # messaggio richiede davvero una verifica. Un saluto puro
+        # ("Buongiorno") riceve solo un saluto, non "un attimo verifico"
+        # - non c'è nulla da verificare finché non esprime un'intenzione.
+        precomputed_ai1 = None
         if context.conversation.status == ConversationStatus.NEW:
-            await send_whatsapp_message(phone, format_ack_message(tenant.get("timezone")), token, phone_id)
+            precomputed_ai1 = run_ai1_interpreter(
+                combined_text, build_ai1_input(context), tenant.get("timezone")
+            )
+            if precomputed_ai1.intent not in _CHITCHAT_INTENTS_NO_ACK:
+                await send_whatsapp_message(phone, format_ack_message(tenant.get("timezone")), token, phone_id)
 
         knowledge = get_tenant_knowledge(tenant_id) or {}
         knowledge_texts = {key: knowledge.get(key) or "" for key in _KNOWLEDGE_TEXT_KEYS}
@@ -108,6 +120,7 @@ async def handle_whatsapp_message_new_pipeline(
             tenant=tenant,
             knowledge=knowledge,
             knowledge_texts=knowledge_texts,
+            precomputed_ai1=precomputed_ai1,
         )
     except Exception as exc:
         # Qualunque errore imprevisto, in QUALUNQUE fase (non solo
