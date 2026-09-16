@@ -26,8 +26,9 @@ ROUTING_TABLE (fallback): solo i pochi casi VERAMENTE legati a uno step
 preciso, non a un segnale generico.
 """
 
-from app.context.models import ConversationContext, ConversationStep, Intent, OperationType, SystemResult
+from app.context.models import BookingStatus, ConversationContext, ConversationStep, Intent, OperationType, SystemResult
 from app.flows import booking, reschedule
+from app.flows.common import abandon_current_request
 
 _FLOW_BY_OPERATION = {
     OperationType.CREATE: booking,
@@ -53,17 +54,14 @@ def _generic(function_name: str):
 
 UNIVERSAL_RULES = [
     (
-        lambda ctx: (
-            ctx.conversation.current_intent == Intent.BOOK
-            and ctx.conversation.current_step != ConversationStep.COMPLETED
-        ),
+        # BOOK riparte SEMPRE, anche subito dopo aver appena concluso
+        # una prenotazione precedente: è una richiesta nuova e legittima.
+        lambda ctx: ctx.conversation.current_intent == Intent.BOOK,
         booking.start_search,
     ),
     (
-        lambda ctx: (
-            ctx.conversation.current_intent == Intent.RESCHEDULE
-            and ctx.conversation.current_step != ConversationStep.COMPLETED
-        ),
+        # Stesso discorso per RESCHEDULE.
+        lambda ctx: ctx.conversation.current_intent == Intent.RESCHEDULE,
         reschedule.identify_target,
     ),
     (
@@ -84,6 +82,20 @@ UNIVERSAL_RULES = [
     (
         lambda ctx: ctx.conversation.current_intent == Intent.REJECT and ctx.confirmation.required,
         _generic("reject_confirmation"),
+    ),
+    (
+        # "Annulla"/"lascia perdere" mentre una richiesta è ancora in
+        # corso (nessun appuntamento reale ancora creato/spostato) ->
+        # semplice abbandono, nessuna scrittura sul database. Diverso
+        # dal cancellare un appuntamento GIA' esistente (dominio a
+        # parte, non ancora costruito): lì, senza uno step attivo,
+        # questa regola non scatta e si resta su UNHANDLED_STATE.
+        lambda ctx: (
+            ctx.conversation.current_intent == Intent.CANCEL
+            and ctx.conversation.current_step not in (ConversationStep.IDLE, ConversationStep.COMPLETED)
+            and ctx.booking.status not in (BookingStatus.CONFIRMED, BookingStatus.RESCHEDULED)
+        ),
+        abandon_current_request,
     ),
 ]
 
