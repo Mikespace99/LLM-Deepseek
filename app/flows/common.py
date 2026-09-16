@@ -18,6 +18,7 @@ anch'esso.
 from __future__ import annotations
 
 from app.booking import engine
+from app.repositories import appointment as appointment_repo
 from app.context.models import (
     AvailableSlot,
     Booking,
@@ -226,14 +227,41 @@ def advance_after_slot_selection(context: ConversationContext) -> tuple[Conversa
     return context, SystemResult(success=True, data={"next": "ask_name"})
 
 
-def advance_after_customer_data(context: ConversationContext) -> tuple[ConversationContext, SystemResult]:
-    """Generico quanto sopra: una volta ottenuto il nome, si passa alla conferma."""
+def advance_after_customer_data(
+    context: ConversationContext, tenant: dict
+) -> tuple[ConversationContext, SystemResult]:
+    """
+    Una volta ottenuto il nome, si controlla SUBITO se è una terza
+    persona diversa sullo stesso numero (non alla fine, dopo che il
+    cliente ha già scelto slot e sta per confermare): inutile fargli
+    fare tutto il percorso per poi rifiutarlo solo all'ultimo passo.
+
+    Se rifiutato, è uno STOP completo e definitivo - non si torna a
+    riproporre slot o a continuare come se nulla fosse: la richiesta
+    corrente viene abbandonata, esattamente come un annullamento.
+    """
     context = context.model_copy(deep=True)
 
-    if not (context.customer.full_name.value or "").strip():
+    full_name = (context.customer.full_name.value or "").strip()
+    if not full_name:
         # Il dato non e' ancora arrivato (il messaggio non lo conteneva):
         # restiamo nello stesso step, il Router ripropone la domanda.
         return context, SystemResult(success=False, error_code="MISSING_CUSTOMER_NAME")
+
+    if context.customer.id:
+        try:
+            existing_names = appointment_repo.list_person_names_for_customer(tenant["id"], context.customer.id)
+        except Exception as exc:
+            print(f"[flows.common.advance_after_customer_data] errore lettura nomi esistenti: {exc!r}")
+            existing_names = []
+
+        is_new_name = full_name.lower() not in {n.lower() for n in existing_names}
+        if is_new_name and len(existing_names) >= 2:
+            context = reset_for_new_operation(context)
+            context.conversation.current_step = ConversationStep.IDLE
+            context.conversation.pending_action = PendingAction.NONE
+            context.operation = Operation()
+            return context, SystemResult(success=False, error_code="TOO_MANY_NAMES_FOR_PHONE")
 
     context.conversation.current_step = ConversationStep.WAITING_FOR_CONFIRMATION
     context.conversation.pending_action = PendingAction.CONFIRM
