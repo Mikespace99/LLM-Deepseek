@@ -53,10 +53,19 @@ def resolve_response_type(
 
     if not system_result.success:
         if system_result.error_code == "UNHANDLED_STATE":
+            if context.conversation.current_step == ConversationStep.COMPLETED:
+                # Dopo che tutto è già concluso, un messaggio che non
+                # corrisponde a nessuna richiesta chiara (es. "va bene",
+                # un saluto finale) è quasi sempre solo cortesia, non
+                # una domanda: chiusura breve, non "può riformulare?".
+                return ResponseType.GOODBYE
             return ResponseType.ASK_CLARIFICATION
         return ResponseType.ERROR
 
     step = context.conversation.current_step
+
+    if system_result.data.get("next") == "abandoned":
+        return ResponseType.REQUEST_ABANDONED
 
     if step == ConversationStep.COMPLETED:
         return _COMPLETED_TO_RESPONSE_TYPE.get(context.operation.type, ResponseType.INFORMATION)
