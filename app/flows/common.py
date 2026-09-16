@@ -25,11 +25,29 @@ from app.context.models import (
     ContextValue,
     ConversationContext,
     ConversationStep,
+    Operation,
     OfferedSlot,
     PendingAction,
     SearchCriteria,
     SystemResult,
 )
+
+
+def abandon_current_request(context: ConversationContext, **_ignored) -> tuple[ConversationContext, SystemResult]:
+    """
+    L'utente vuole "annullare" mentre una richiesta è ancora in corso
+    (nessun appuntamento reale ancora creato/spostato): non è la stessa
+    cosa di cancellare un appuntamento già esistente (quello è un
+    dominio a parte, non ancora costruito). Qui basta tornare a uno
+    stato neutro - nessuna scrittura sul database, perché non c'è
+    ancora nulla di reale da toccare.
+    """
+    context = reset_for_new_operation(context)
+    context.conversation.current_step = ConversationStep.IDLE
+    context.conversation.pending_action = PendingAction.NONE
+    context.operation = Operation()
+    context.conversation.current_operation = context.operation.type
+    return context, SystemResult(success=True, data={"next": "abandoned"})
 
 
 def reset_for_new_operation(context: ConversationContext) -> ConversationContext:
