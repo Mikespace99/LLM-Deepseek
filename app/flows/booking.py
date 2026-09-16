@@ -19,7 +19,7 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from app.booking import engine
-from app.context.models import ConversationContext, ConversationStep, OfferedDay, PendingAction, SystemResult
+from app.context.models import ConversationContext, ConversationStep, Operation, OfferedDay, PendingAction, SystemResult
 from app.flows.common import (
     advance_after_customer_data,
     advance_after_slot_selection,
@@ -164,9 +164,9 @@ def slot_selected(context: ConversationContext, **_ignored) -> tuple[Conversatio
     return advance_after_slot_selection(context)
 
 
-def customer_data_provided(context: ConversationContext, **_ignored) -> tuple[ConversationContext, SystemResult]:
+def customer_data_provided(context: ConversationContext, tenant: dict, **_ignored) -> tuple[ConversationContext, SystemResult]:
     """Step: COLLECTING_CUSTOMER_DATA + intent PROVIDE_DATA -> passo generico."""
-    return advance_after_customer_data(context)
+    return advance_after_customer_data(context, tenant)
 
 
 def confirm(
@@ -210,6 +210,16 @@ def confirm(
 
     if not result.get("success"):
         error = result.get("error") or "UNKNOWN_ERROR"
+
+        if error == "too_many_names_for_phone":
+            # Stesso trattamento del controllo anticipato: stop
+            # completo e pulito, non si riprende come se nulla fosse.
+            context = reset_for_new_operation(context)
+            context.conversation.current_step = ConversationStep.IDLE
+            context.conversation.pending_action = PendingAction.NONE
+            context.operation = Operation()
+            return context, SystemResult(success=False, error_code=error.upper())
+
         # Torniamo a proporre lo slot: l'utente potrà scegliere un'altra opzione.
         context.conversation.current_step = ConversationStep.WAITING_FOR_SLOT
         context.booking.status = context.booking.status.__class__.FAILED
