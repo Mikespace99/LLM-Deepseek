@@ -610,6 +610,7 @@ async def api_agenda_create_appointment(body: AppointmentCreateIn, request: Requ
             notes=body.notes,
             status="confirmed",
             created_by=user["id"],
+            person_name=None if is_block else (body.customer_name or None),
         )
     except Exception as e:
         if appointment_repo.is_overlap_error(e):
