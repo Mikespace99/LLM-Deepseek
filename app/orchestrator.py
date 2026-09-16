@@ -65,9 +65,15 @@ def handle_message(
     tenant: dict,
     knowledge: dict,
     knowledge_texts: dict | None = None,
+    precomputed_ai1=None,
 ) -> tuple[ConversationContext, OutgoingMessage]:
-    # 1. AI#1: interpreta (solo il blocco minimo, non l'intero context)
-    ai1 = run_ai1_interpreter(message_text, build_ai1_input(context), tenant.get("timezone"))
+    # 1. AI#1: interpreta (solo il blocco minimo, non l'intero context).
+    # Se il chiamante l'ha già classificato (es. per decidere se inviare
+    # l'ack prima di iniziare), riusiamo quello - non lo richiediamo due volte.
+    if precomputed_ai1 is not None:
+        ai1 = precomputed_ai1
+    else:
+        ai1 = run_ai1_interpreter(message_text, build_ai1_input(context), tenant.get("timezone"))
     print(f"[DIAGNOSTICA AI1] intent={ai1.intent} entities={ai1.entities} needs_clarification={ai1.needs_clarification} reason={ai1.clarification_reason}")
 
     # 2. Context Manager: aggiorna lo stato
@@ -87,7 +93,13 @@ def handle_message(
         response_type = ResponseType.ASK_CLARIFICATION
 
     # 5. Costruzione del messaggio, testo (o sequenza) + eventuali bottoni/lista.
-    if response_type == ResponseType.CONFIRM_APPOINTMENT_TARGET and context.appointments:
+    if response_type == ResponseType.REQUEST_ABANDONED:
+        # Testo fisso e deterministico: non serve l'AI per dire
+        # "va bene, ho annullato" - zero rischio, zero costo.
+        outgoing = OutgoingMessage(
+            texts=["Va bene, ho annullato la richiesta in corso. Se vorrà prenotare in futuro sono a disposizione."]
+        )
+    elif response_type == ResponseType.CONFIRM_APPOINTMENT_TARGET and context.appointments:
         # Caso speciale: la domanda contiene una data/ora/nome reali,
         # quindi la componiamo in modo deterministico invece di farla
         # scrivere ad AI#2 - stesso motivo per cui non le facciamo mai
