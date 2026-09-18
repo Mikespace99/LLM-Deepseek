@@ -1,0 +1,215 @@
+{% extends "base_dashboard.html" %}
+{% block title %}Clienti – AI Booking{% endblock %}
+{% block mobile_title %}Clienti{% endblock %}
+
+{% block content %}
+<div x-data="clientiApp()" x-init="init()">
+
+  <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+    <div>
+      <h1 class="text-xl font-bold text-gray-900">Clienti</h1>
+      <p class="text-sm text-gray-500">Anagrafica e storico appuntamenti.</p>
+    </div>
+    <button @click="openCreateModal()"
+            class="hidden md:flex items-center gap-2 px-4 py-2 rounded-lg bg-brand-600 text-white text-sm font-medium hover:bg-brand-700">
+      + Nuovo Cliente
+    </button>
+  </div>
+
+  <div class="bg-white rounded-2xl border border-gray-200 p-4 sm:p-5">
+    <div class="mb-4">
+      <div class="relative max-w-sm">
+        <svg class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-4.35-4.35M17 10a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+        <input type="text" x-model="query" @input.debounce.350ms="load()"
+               placeholder="Cerca cliente…"
+               class="w-full pl-9 pr-3 py-2 rounded-lg border border-gray-300 text-sm">
+      </div>
+    </div>
+
+    <div x-show="loading" class="text-sm text-gray-400 text-center py-10">Caricamento…</div>
+    <div x-show="!loading && items.length === 0" x-cloak class="text-sm text-gray-400 text-center py-10">Nessun cliente trovato.</div>
+
+    <!-- vista tabella (desktop) -->
+    <div class="hidden sm:block overflow-x-auto" x-show="!loading && items.length">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="text-left text-gray-400 text-xs uppercase border-b border-gray-100">
+            <th class="py-2 pr-3 font-medium">Nome Cliente</th>
+            <th class="py-2 pr-3 font-medium">Contatti</th>
+            <th class="py-2 pr-3 font-medium">Ultimo app.</th>
+            <th class="py-2 pr-3 font-medium">Prossimo app.</th>
+            <th class="py-2 pr-3 font-medium text-right">Azioni</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="c in items" :key="c.id">
+            <tr class="border-b border-gray-50 last:border-0">
+              <td class="py-3 pr-3">
+                <div class="flex items-center gap-2">
+                  <div class="w-8 h-8 rounded-full bg-brand-100 text-brand-700 flex items-center justify-center text-xs font-semibold shrink-0" x-text="initials(c.full_name)"></div>
+                  <span class="font-medium text-gray-800" x-text="c.full_name || 'Senza nome'"></span>
+                </div>
+              </td>
+              <td class="py-3 pr-3 text-gray-600">
+                <div x-text="c.phone_number || '—'"></div>
+                <div class="text-xs text-gray-400" x-text="c.email || ''"></div>
+              </td>
+              <td class="py-3 pr-3 text-gray-500" x-text="fmtDate(c.last_appointment) || '—'"></td>
+              <td class="py-3 pr-3" x-text="fmtDate(c.next_appointment) || '—'"
+                  :class="c.next_appointment ? 'text-brand-600 font-medium' : 'text-gray-400'"></td>
+              <td class="py-3 pr-3 text-right">
+                <button @click="openEditModal(c)" class="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-700">
+                  <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+                </button>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- vista card (mobile) -->
+    <div class="sm:hidden space-y-3" x-show="!loading && items.length">
+      <template x-for="c in items" :key="c.id">
+        <button @click="openEditModal(c)" class="w-full text-left border border-gray-100 rounded-xl p-3">
+          <div class="flex items-center gap-2 mb-1">
+            <div class="w-8 h-8 rounded-full bg-brand-100 text-brand-700 flex items-center justify-center text-xs font-semibold shrink-0" x-text="initials(c.full_name)"></div>
+            <div class="min-w-0">
+              <div class="text-sm font-medium text-gray-800 truncate" x-text="c.full_name || 'Senza nome'"></div>
+              <div class="text-xs text-gray-400" x-text="c.phone_number || '—'"></div>
+            </div>
+          </div>
+          <div class="text-xs text-gray-500 flex gap-3 mt-2">
+            <span>Ultimo: <span x-text="fmtDate(c.last_appointment) || '—'"></span></span>
+            <span>Prossimo: <span :class="c.next_appointment ? 'text-brand-600 font-medium' : ''" x-text="fmtDate(c.next_appointment) || '—'"></span></span>
+          </div>
+        </button>
+      </template>
+    </div>
+
+    <!-- paginazione -->
+    <div class="flex items-center justify-between mt-4 pt-4 border-t border-gray-100 text-sm text-gray-500" x-show="total > pageSize">
+      <span x-text="'Mostrando ' + Math.min(items.length, pageSize) + ' di ' + total + ' clienti'"></span>
+      <div class="flex items-center gap-2">
+        <button @click="prevPage()" :disabled="offset === 0" class="p-1.5 rounded-lg border border-gray-200 disabled:opacity-40 hover:bg-gray-50">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
+        </button>
+        <button @click="nextPage()" :disabled="offset + pageSize >= total" class="p-1.5 rounded-lg border border-gray-200 disabled:opacity-40 hover:bg-gray-50">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <button @click="openCreateModal()"
+          class="md:hidden fixed bottom-5 right-5 z-30 w-14 h-14 rounded-full bg-brand-600 text-white shadow-lg flex items-center justify-center">
+    <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+  </button>
+
+  <div x-show="toast" x-cloak
+       class="fixed top-4 right-4 z-50 px-4 py-3 rounded-lg shadow-lg text-sm font-medium"
+       :class="toastOk ? 'bg-green-600 text-white' : 'bg-red-600 text-white'"
+       x-text="toast"></div>
+
+  <!-- MODAL: nuovo / modifica cliente -->
+  <div x-show="modalOpen" x-cloak
+       class="fixed inset-0 bg-black/40 z-40 flex items-center justify-center p-4" @click.self="modalOpen = false">
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-md p-6" @click.stop>
+      <h2 class="text-lg font-bold mb-4" x-text="editingId ? 'Modifica cliente' : 'Nuovo cliente'"></h2>
+
+      <div class="space-y-3 mb-5">
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Nome e cognome</label>
+          <input type="text" x-model="form.full_name" class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Telefono</label>
+          <input type="text" x-model="form.phone_number" placeholder="+39…" class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Email (opzionale)</label>
+          <input type="email" x-model="form.email" class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm">
+        </div>
+      </div>
+
+      <div class="flex justify-end gap-2">
+        <button @click="modalOpen = false" class="px-4 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-100">Annulla</button>
+        <button @click="submitForm()" :disabled="saving"
+                class="px-4 py-2 rounded-lg bg-brand-600 text-white text-sm font-medium hover:bg-brand-700 disabled:opacity-50">
+          <span x-text="saving ? 'Salvataggio…' : 'Salva'"></span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block page_scripts %}
+<script>
+  function clientiApp() {
+    return {
+      items: [], total: 0, query: '', offset: 0, pageSize: 20, loading: false,
+      modalOpen: false, editingId: null, saving: false,
+      form: { full_name: '', phone_number: '', email: '' },
+      toast: '', toastOk: true,
+
+      async init() { await this.load(); },
+
+      async load() {
+        this.loading = true;
+        const qs = new URLSearchParams({ q: this.query, limit: this.pageSize, offset: this.offset });
+        const res = await fetch('/api/clients?' + qs).then(r => r.json()).catch(() => ({ items: [], total: 0 }));
+        this.items = res.items || [];
+        this.total = res.total || 0;
+        this.loading = false;
+      },
+
+      prevPage() { this.offset = Math.max(0, this.offset - this.pageSize); this.load(); },
+      nextPage() { this.offset += this.pageSize; this.load(); },
+
+      openCreateModal() {
+        this.editingId = null;
+        this.form = { full_name: '', phone_number: '', email: '' };
+        this.modalOpen = true;
+      },
+      openEditModal(c) {
+        this.editingId = c.id;
+        this.form = { full_name: c.full_name || '', phone_number: c.phone_number || '', email: c.email || '' };
+        this.modalOpen = true;
+      },
+
+      async submitForm() {
+        if (!this.form.full_name || !this.form.phone_number) {
+          this.showToast('Nome e telefono sono obbligatori', false); return;
+        }
+        this.saving = true;
+        const url = this.editingId ? '/api/clients/' + this.editingId : '/api/clients';
+        const method = this.editingId ? 'PATCH' : 'POST';
+        const res = await fetch(url, {
+          method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(this.form)
+        });
+        this.saving = false;
+        if (!res.ok) { this.showToast('Errore nel salvataggio', false); return; }
+        this.modalOpen = false;
+        this.showToast('Salvato', true);
+        this.load();
+      },
+
+      initials(name) {
+        if (!name) return '?';
+        return name.trim().split(/\s+/).slice(0, 2).map(p => p[0].toUpperCase()).join('');
+      },
+      fmtDate(iso) {
+        if (!iso) return '';
+        const d = new Date(iso + 'T00:00:00');
+        return d.toLocaleDateString('it-IT', { day: '2-digit', month: 'short', year: 'numeric' });
+      },
+      showToast(msg, ok) {
+        this.toast = msg; this.toastOk = ok;
+        setTimeout(() => { this.toast = ''; }, 3000);
+      },
+    };
+  }
+</script>
+{% endblock %}
