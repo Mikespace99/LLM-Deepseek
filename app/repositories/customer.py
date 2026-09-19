@@ -10,17 +10,47 @@ from app.supabase_client import get_supabase
 
 def normalize_phone(phone: str | None) -> str:
     """
-    Normalizza il numero WhatsApp:
-    - rimuove spazi, trattini, parentesi
-    - rimuove il prefisso +
-    - lascia solo cifre
-    Esempio: "+39 333-1234567" → "393331234567"
+    Salva sempre in formato internazionale IT (solo cifre, con 39):
+      "+39 333 1234567" → "393331234567"
+      "3331234567"      → "393331234567"
+      "03331234567"     → "393331234567"
+      "393331234567"    → "393331234567"
     """
     if not phone:
         return ""
-    # Solo cifre
+
     digits = re.sub(r"\D", "", str(phone))
+    if not digits:
+        return ""
+
+    if digits.startswith("39") and len(digits) >= 11:
+        return digits
+
+    if digits.startswith("0"):
+        digits = digits.lstrip("0")
+
+    if len(digits) == 10 and digits.startswith("3"):
+        return "39" + digits
+
     return digits
+
+
+def format_phone_display(phone: str | None) -> str:
+    """
+    Per UI (agenda, clienti, ecc.): toglie il 39 e raggruppa le cifre.
+      "393331234567" → "333 123 4567"
+    """
+    digits = normalize_phone(phone)
+    if not digits:
+        return ""
+
+    national = digits[2:] if digits.startswith("39") and len(digits) > 2 else digits
+
+    # Cellulare 10 cifre: 3xx xxx xxxx
+    if len(national) == 10:
+        return f"{national[:3]} {national[3:6]} {national[6:]}"
+
+    return national
 
 
 def search_customers(tenant_id: str, query: str, limit: int = 8) -> list[dict]:
