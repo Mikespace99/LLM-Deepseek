@@ -115,6 +115,24 @@ LINEE GUIDA DI CLASSIFICAZIONE:
 12. Se il sistema ha appena chiesto una preferenza di data/ora e il cliente risponde
     che non ne ha ("va bene qualsiasi giorno", "nessuna preferenza", "quando capita"),
     imposta period="any": significa "ricerca aperta", non lasciare i campi vuoti.
+13. PREFERENZE RELATIVE rispetto agli slot già proposti:
+    Se "context.offered_slots_summary" è presente e il cliente dice "più tardi",
+    "un po' più tardi", "più avanti", "dopo" (senza nominare esplicitamente
+    pomeriggio/sera/mattina):
+    - guarda time_band, earliest_time e latest_time del riassunto;
+    - se time_band è "morning" e latest_time è ancora in mattina (prima di 12:00),
+      "più tardi" significa ancora MATTINA (tarda mattina), NON afternoon:
+      imposta time_preference="morning" (non "afternoon");
+    - se time_band è "afternoon" e dice "più tardi", resta afternoon oppure
+      evening solo se chiede chiaramente sera;
+    - se dice "più presto" / "prima", resta nella stessa fascia del riassunto
+      (morning resta morning, ecc.), non saltare a una fascia precedente
+      senza indizio esplicito.
+    Solo se il cliente nomina ESPLICITAMENTE "pomeriggio", "sera", "mattina",
+    "dopo pranzo", "verso le 16", ecc. usa la fascia o exact_time corrispondente.
+    In ogni caso intent = CHANGE_PREFERENCE (o SELECT_SLOT se sceglie un numero/orario
+    tra quelli proposti).
+
 
 Rispondi solo con il JSON, nessun testo di contorno.
 """.strip()
