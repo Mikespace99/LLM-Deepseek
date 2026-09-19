@@ -160,7 +160,7 @@ def list_customers(tenant_id: str, search: str = "", limit: int = 20, offset: in
         c["next_appointment"] = future[0]["appointment_date"] if future else None
 
     for c in customers:
-    c["phone_number"] = format_phone_display(c.get("phone_number"))
+          c["phone_number"] = format_phone_display(c.get("phone_number"))
 
     return {"items": customers, "total": total}
 
