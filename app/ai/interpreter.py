@@ -95,6 +95,13 @@ LINEE GUIDA DI CLASSIFICAZIONE:
    servizi. Non e' una richiesta di prenotazione.
 4. BOOK: richiesta di fissare un nuovo appuntamento (anche generica, es. "vorrei
    prenotare", "quando siete liberi?"), senza che esista gia' un appuntamento target.
+   IMPORTANTE: se il cliente chiede "c'è disponibilità", "avete posto", "siete liberi"
+   insieme a un periodo o a un riferimento temporale (prossima settimana, domani,
+   venerdì, mattina, ecc.) OPPURE insieme alla parola "appuntamento" / "prenotare",
+   l'intent è BOOK (non ASK_INFORMATION). Valorizza period/weekday/time_preference
+   come di consueto (es. "prossima settimana" -> period="next_week").
+   ASK_INFORMATION resta solo per domande su prezzi, indirizzo, parcheggio, servizi,
+   orari di apertura dello studio in generale - NON per cercare uno slot da prenotare.
 5. RESCHEDULE: l'utente vuole spostare/cambiare un appuntamento GIA' fissato. Non
    devi individuare tu quale: lo fa il backend. Se nello stesso messaggio indica anche
    una nuova preferenza di giorno/orario, valorizzala normalmente nelle entities.
