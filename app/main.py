@@ -169,7 +169,7 @@ async def process_messages(messages: list[dict]):
     )
     print(f"=== PROCESS {len(messages)} MSG da {phone} ===")
 
-    await handle_whatsapp_message_new_pipeline(
+    await handle_whatsapp_message(
         phone,
         business_phone,
         combined_text,
