@@ -138,19 +138,37 @@ def _apply_appointment_selection(context: ConversationContext, matched: Appointm
     context.selected_appointment_id = matched.id
 
 
-def _apply_day_selection(context: ConversationContext, matched: OfferedDay) -> None:
+def _apply_day_selection(
+    context: ConversationContext,
+    matched: OfferedDay,
+    entities: dict | None = None,
+) -> None:
     """
-    Ancora la ricerca ESATTAMENTE al giorno scelto dalla panoramica,
-    invece di lasciare che venga ri-derivato da zero (es. "venerdì" da
-    solo, senza sapere più "di quale settimana"). I giorni mostrati
-    sono la fonte di verità: una volta usati, si scartano.
+    Ancora la ricerca al giorno scelto dalla panoramica.
+    Se nello stesso messaggio c'è anche una fascia oraria
+    (es. \"mercoledì tardo pomeriggio\"), la applica subito:
+    altrimenti si perderebbe perché resolve_search_criteria
+    non viene chiamato quando matched_day è True.
     """
     context.search.date_from = matched.date
     context.search.date_to = matched.date
+    context.search.preferred_date = matched.date
     context.search.period = None
     context.search.week_part = None
     context.search.preferred_weekday = None
     context.offered_days = []
+
+    entities = entities or {}
+    if entities.get("time_preference"):
+        context.search.time_preference = entities["time_preference"]
+    if entities.get("exact_time"):
+        try:
+            hh, mm = str(entities["exact_time"]).split(":")
+            from datetime import time as _time
+            context.search.preferred_time = _time(hour=int(hh), minute=int(mm))
+            context.search.time_preference = "exact"
+        except Exception:
+            pass
 
 
 def _apply_confirmation(context: ConversationContext, intent: Intent) -> None:
@@ -236,7 +254,7 @@ def apply_ai1_result(
     if matched_slot:
         _apply_slot_selection(context, matched_slot)
     elif matched_day:
-        _apply_day_selection(context, matched_day)
+        _apply_day_selection(context, matched_day, ai1.entities)
     elif matched_appointment:
         _apply_appointment_selection(context, matched_appointment)
 
