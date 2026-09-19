@@ -135,14 +135,20 @@ def _format_day_with_period(day: dict) -> str:
 
 def format_week_overview(data: dict, today: date) -> list[str]:
     """
-    Panoramica di disponibilità, come SEQUENZA di messaggi (uno per
-    questa settimana, uno per la prossima se disponibile) - mai un
-    unico blocco. Giorni e fasce orarie scritti in modo deterministico,
-    mai dall'AI. Max 3 giorni per settimana.
+    Panoramica di disponibilità, come SEQUENZA di messaggi.
+    Se data['time_preference'] è morning/afternoon, il testo parla di
+    quella fascia e elenca solo i giorni (già filtrati a monte).
     """
     this_week = (data.get("this_week") or [])[:3]
     next_week = (data.get("next_week") or [])[:3]
     first_available = data.get("first_available")
+    time_pref = data.get("time_preference")  # morning | afternoon | evening | None
+
+    band_it = {
+        "morning": "mattina",
+        "afternoon": "pomeriggio",
+        "evening": "sera",
+    }.get(time_pref)
 
     if not this_week and not next_week:
         if first_available:
@@ -157,22 +163,45 @@ def format_week_overview(data: dict, today: date) -> list[str]:
 
     messages = []
 
+    def _day_line(d: dict, use_relative: bool) -> str:
+        if use_relative:
+            label = relative_day_label(date.fromisoformat(d["date"]), today).capitalize()
+        else:
+            label = d["label"]
+        # Con fascia già scelta non ripetiamo "solo mattina/pomeriggio".
+        if band_it:
+            return f"- {label}"
+        period_text = _period_text(d)
+        return f"- {label} ({period_text})" if period_text else f"- {label}"
+
     if this_week:
-        lines = "\n".join(
-            f"- {relative_day_label(date.fromisoformat(d['date']), today).capitalize()} ({_period_text(d)})"
-            for d in this_week
-        )
-        messages.append(f"Per questa settimana abbiamo le seguenti disponibilità:\n{lines}")
-    elif not data.get("this_week_over"):
-        messages.append("Per questa settimana non abbiamo disponibilità.")
-    # se this_week_over è True e non ci sono giorni, non diciamo nulla
-    # sulla settimana corrente: si passa direttamente alla prossima.
+        lines = "\n".join(_day_line(d, use_relative=True) for d in this_week)
+        if band_it:
+            messages.append(
+                f"Per la {band_it} di questa settimana abbiamo disponibilità nei seguenti giorni:\n{lines}"
+            )
+        else:
+            messages.append(f"Per questa settimana abbiamo le seguenti disponibilità:\n{lines}")
+    elif not data.get("this_week_over") and data.get("period") != "next_week":
+        # Non dire "questa settimana no" se l'utente ha chiesto solo la prossima.
+        if band_it:
+            messages.append(f"Per la {band_it} di questa settimana non abbiamo disponibilità.")
+        else:
+            messages.append("Per questa settimana non abbiamo disponibilità.")
 
     if next_week:
-        lines = "\n".join(f"- {_format_day_with_period(d)}" for d in next_week)
-        messages.append(f"Per quanto riguarda la prossima settimana ci sono le seguenti disponibilità:\n{lines}")
+        lines = "\n".join(_day_line(d, use_relative=False) for d in next_week)
+        if band_it:
+            messages.append(
+                f"Per la {band_it} della prossima settimana ci sono disponibilità nei seguenti giorni:\n{lines}"
+            )
+        else:
+            messages.append(
+                f"Per quanto riguarda la prossima settimana ci sono le seguenti disponibilità:\n{lines}"
+            )
 
-    messages[-1] += "\n\nMi faccia sapere quale preferisce, così le mostro gli orari precisi."
+    if messages:
+        messages[-1] += "\n\nMi faccia sapere quale giorno preferisce, così le mostro gli orari precisi."
     return messages
 
 
