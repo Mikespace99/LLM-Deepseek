@@ -73,12 +73,17 @@ def reset_for_new_operation(context: ConversationContext) -> ConversationContext
     context.operation.target_appointment_id = None
     return context
 
-
 def has_search_criteria(context: ConversationContext) -> bool:
-    """L'utente ha già espresso ALMENO un criterio (anche generico, es. 'nessuna preferenza' -> period='any')?"""
-    s = context.search
-    return bool(s.period or s.preferred_weekday or s.date_from or s.preferred_time or s.time_from)
+    """
+    True solo se c'è un giorno/data abbastanza specifici da lanciare
+    subito la ricerca dei 3 slot.
 
+    Periodo (this_week/next_week/...) e/o fascia oraria (morning/afternoon)
+    NON bastano: in quei casi si mostra la panoramica dei giorni
+    (eventualmente filtrata sulla fascia).
+    """
+    s = context.search
+    return bool(s.preferred_weekday or s.date_from or s.preferred_date)
 
 def search_or_ask_preference(
     context: ConversationContext,
