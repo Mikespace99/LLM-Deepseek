@@ -100,6 +100,40 @@ def search_or_ask_preference(
     return run_availability_search(context, tenant, knowledge)
 
 
+def reject_offered_slots(context: ConversationContext, **_ignored) -> tuple[ConversationContext, SystemResult]:
+    """
+    Intent REJECT mentre ci sono slot proposti (e non siamo in fase di
+    conferma di un singolo slot).
+
+    1. Aggiunge gli slot appena mostrati alla blacklist (excluded_slots)
+       così la prossima ricerca non li ripropone.
+    2. Svuota la lista offerta.
+    3. Torna in SEARCH_AVAILABILITY e chiede preferenze alternative
+       (data e/o orario) in modo elastico.
+    """
+    context = context.model_copy(deep=True)
+
+    # Blacklist: gli slot appena rifiutati non devono riapparire subito.
+    existing = set(context.search.excluded_slots or [])
+    for offered in context.offered_slots:
+        existing.add(offered.slot.id)
+    context.search.excluded_slots = list(existing)
+
+    context.offered_slots = []
+    context.booking.slot_id = None
+    context.confirmation.required = False
+    context.confirmation.status = None
+    context.confirmation.confirmation_type = None
+
+    context.conversation.current_step = ConversationStep.SEARCH_AVAILABILITY
+    context.conversation.pending_action = PendingAction.PROVIDE_DATE
+
+    return context, SystemResult(
+        success=True,
+        data={"next": "ask_alternative_preference"},
+    )
+
+
 def run_availability_search(
     context: ConversationContext,
     tenant: dict,
@@ -162,6 +196,9 @@ def build_search_collected_data(context: ConversationContext) -> dict:
             "date": search.preferred_date.isoformat() if search.preferred_date else None,
             "time_preference": search.time_preference,
             "exact_time": search.preferred_time.strftime("%H:%M") if search.preferred_time else None,
+            # Blacklist: slot (e date) già rifiutati dall'utente in questa conversazione.
+            "excluded_slots": list(search.excluded_slots or []),
+            "excluded_dates": [d.isoformat() for d in (search.excluded_dates or [])],
         },
     }
 
