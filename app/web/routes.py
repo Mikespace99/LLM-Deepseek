@@ -40,6 +40,7 @@ from app.repositories.customer import (
     get_or_create_customer,
     update_customer_name,
     normalize_phone,
+    format_phone_display,
     list_customers,
     get_customer,
     create_customer_manual,
@@ -490,7 +491,9 @@ def _appointment_to_event(row: dict, tz_name: str) -> dict:
             "service_name": service.get("name") or row.get("service"),
             "customer_id": row.get("customer_id"),
             "customer_name": customer.get("full_name"),
-            "customer_phone": row.get("phone_number") or customer.get("phone_number"),
+            "customer_phone": format_phone_display(
+                   row.get("phone_number") or customer.get("phone_number")
+             ),
             "location_id": row.get("location_id"),
             "location_name": location.get("name"),
             "notes": row.get("notes"),
