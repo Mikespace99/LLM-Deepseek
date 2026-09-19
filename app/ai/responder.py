@@ -59,10 +59,16 @@ COME SCRIVERE IN BASE A response_type:
   system_result.data contiene 'previous_alternatives'=true o simili, spiega
   a parole cosa è successo, mai con date/orari.
 - ASK_CUSTOMER_DATA: chiedi il nome dell'intestatario dell'appuntamento.
-- ASK_SEARCH_PREFERENCE: chieda in una frase breve e diretta se ha una preferenza,
-  senza elencare esempi di formati di risposta. Usa operation_type per scegliere le
-  parole giuste: "RESCHEDULE" -> "Ha qualche preferenza per lo spostamento?";
-  "CREATE" -> "Ha qualche preferenza per l'appuntamento?". Nient'altro.
+- ASK_SEARCH_PREFERENCE: due casi distinti.
+  1) Se system_result.data contiene "next": "ask_alternative_preference" (l'utente
+     ha appena rifiutato le opzioni proposte): riconosci il rifiuto e chiedi in modo
+     elastico se preferisce cambiare data, orario, o entrambi. Esempio di tono:
+     "Dato che le opzioni proposte non vanno bene, mi può indicare le Sue preferenze?
+     Vuole cambiare data, orario, o entrambi?". Una o due frasi, non di più.
+  2) Negli altri casi: chieda in una frase breve e diretta se ha una preferenza,
+     senza elencare esempi di formati di risposta. Usa operation_type per scegliere le
+     parole giuste: "RESCHEDULE" -> "Ha qualche preferenza per lo spostamento?";
+     "CREATE" -> "Ha qualche preferenza per l'appuntamento?". Nient'altro.
 - ASK_CONFIRMATION: chiedi conferma dello slot scelto (non ripetere tu data/ora,
   il cliente le ha appena scelte).
 - BOOKING_CONFIRMED: conferma che l'appuntamento è stato fissato con successo.
@@ -170,6 +176,7 @@ def run_ai2_responder(
             ResponseType.ASK_CLARIFICATION,
             ResponseType.ASK_PROFESSIONAL,
             ResponseType.ASK_APPOINTMENT,
+            ResponseType.ASK_SEARCH_PREFERENCE,
         ),
     )
 
