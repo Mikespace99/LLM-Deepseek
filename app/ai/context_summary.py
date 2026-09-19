@@ -6,25 +6,68 @@ sistema. Le vengono dati solo i segnali che le servono per farlo bene:
 
   - cosa sta aspettando il sistema (pending_action) - per capire se
     un "sì"/un numero/un nome è la risposta a quella domanda
-  - SE esistono già slot proposti, e quanti - MAI le date/orari veri
-    (il confronto con gli slot reali lo fa slot_matcher.py in Python,
-    non l'AI)
+  - SE esistono già slot proposti, e quanti - più un RIASSUNTO grezzo
+    della fascia oraria (min/max), MAI l'elenco completo da ripetere
+    (il confronto preciso con gli slot reali lo fa slot_matcher.py)
   - SE mancano ancora dati anagrafici - MAI i valori già forniti
   - i criteri di ricerca già impostati, ma come ETICHETTE (period,
     weekday...), mai come date assolute calcolate
 
-Ogni campo "vero" (date, nomi, id) che non serve alla classificazione
-resta fuori: meno rumore per il modello, e nessuna possibilità che lo
-riscriva male.
+Ogni campo "vero" (date complete, nomi, id) che non serve alla
+classificazione resta fuori: meno rumore per il modello, e nessuna
+possibilità che lo riscriva male.
 """
 
 from __future__ import annotations
 
-from app.context.models import ConversationContext
+from datetime import time
+
+from app.context.models import ConversationContext, OfferedSlot
+
+
+def _time_band(t: time) -> str:
+    """Stesse fasce usate dal resto del sistema (morning/afternoon/evening)."""
+    h = t.hour
+    if h < 12:
+        return "morning"
+    if h < 18:
+        return "afternoon"
+    return "evening"
+
+
+def _summarize_offered_slots(offered: list[OfferedSlot]) -> dict | None:
+    """
+    Riassunto grezzo per AI#1: fascia e estremi orari degli slot già
+    proposti. Serve a interpretare "più tardi" / "più presto" in modo
+    relativo, senza dare l'elenco completo (che non deve riscrivere).
+    """
+    if not offered:
+        return None
+
+    times = [o.slot.time for o in offered]
+    dates = {o.slot.date for o in offered}
+    earliest = min(times)
+    latest = max(times)
+
+    bands = {_time_band(t) for t in times}
+    if len(bands) == 1:
+        time_band = next(iter(bands))
+    else:
+        time_band = "mixed"
+
+    return {
+        "count": len(offered),
+        "time_band": time_band,  # morning | afternoon | evening | mixed
+        "earliest_time": earliest.strftime("%H:%M"),
+        "latest_time": latest.strftime("%H:%M"),
+        "same_day": len(dates) == 1,
+    }
 
 
 def build_ai1_input(context: ConversationContext) -> dict:
     c = context.conversation
+
+    offered_summary = _summarize_offered_slots(context.offered_slots)
 
     return {
         "current_step": c.current_step.value,
@@ -32,6 +75,8 @@ def build_ai1_input(context: ConversationContext) -> dict:
         "pending_action": c.pending_action.value,
 
         "offered_slots_count": len(context.offered_slots),
+        # Riassunto grezzo (fascia + min/max). Assente se non ci sono slot.
+        "offered_slots_summary": offered_summary,
 
         "confirmation_required": context.confirmation.required,
 
