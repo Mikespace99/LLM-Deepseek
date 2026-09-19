@@ -75,15 +75,28 @@ def reset_for_new_operation(context: ConversationContext) -> ConversationContext
 
 def has_search_criteria(context: ConversationContext) -> bool:
     """
-    True solo se c'è un giorno/data abbastanza specifici da lanciare
-    subito la ricerca dei 3 slot.
+    True solo se c'è un GIORNO abbastanza specifico da cercare subito gli slot.
 
-    Periodo (this_week/next_week/...) e/o fascia oraria (morning/afternoon)
-    NON bastano: in quei casi si mostra la panoramica dei giorni
-    (eventualmente filtrata sulla fascia).
+    - preferred_weekday (es. martedì) → sì
+    - preferred_date o una sola data (date_from == date_to) → sì
+    - solo period (this_week / next_week) con range lun–dom → NO
+      (serve la panoramica dei giorni)
+    - solo fascia oraria → NO (panoramica filtrata sulla fascia)
     """
     s = context.search
-    return bool(s.preferred_weekday or s.date_from or s.preferred_date)
+
+    if s.preferred_weekday:
+        return True
+
+    if s.preferred_date:
+        return True
+
+    # Una sola data esplicita (es. "il 25 settembre"), non un range settimanale.
+    if s.date_from and s.date_to and s.date_from == s.date_to:
+        return True
+
+    return False
+
 
 def search_or_ask_preference(
     context: ConversationContext,
