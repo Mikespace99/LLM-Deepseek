@@ -768,17 +768,38 @@ def _generate_and_filter_slots(
                     "[ENGINE] preferred_window senza match: "
                     f"{preferred_window} su {len(all_slots)} slot grezzi"
                 )
-
     filtered = sorted(
         filtered,
         key=lambda slot: slot["start"],
     )
+
+    # Blacklist: slot (e date) già rifiutati dall'utente in questa conversazione.
+    prefs = ctx.get("preferences") or {}
+    excluded_slots = set(prefs.get("excluded_slots") or [])
+    excluded_dates = set(prefs.get("excluded_dates") or [])
+
+    if excluded_slots or excluded_dates:
+        def _is_excluded(slot) -> bool:
+            dt = slot["start"]
+            date_str = dt.strftime("%Y-%m-%d")
+            time_str = f"{dt.hour:02d}:{dt.minute:02d}"
+            slot_id = f"{date_str}_{time_str}"
+            if slot_id in excluded_slots:
+                return True
+            if date_str in excluded_dates:
+                return True
+            return False
+
+        filtered = [s for s in filtered if not _is_excluded(s)]
 
     top = filtered[:MAX_CANDIDATE_SLOTS]
 
     candidate_slots = []
 
     for slot in top:
+
+
+        
         dt = slot["start"]
 
         weekday = ITALIAN_WEEKDAYS[
