@@ -857,9 +857,8 @@ async def process_messages(messages: list[dict]):
     # Se questo numero è nella lista di test, l'intera conversazione
     # passa da app/orchestrator.py e nient'altro qui sotto viene
     # eseguito: le due pipeline non condividono stato né mutazioni.
-    if should_use_new_pipeline(phone):
-        await handle_whatsapp_message_new_pipeline(phone, business_phone, combined_text)
-        return
+    await handle_whatsapp_message_new_pipeline(phone, business_phone, combined_text)
+    return
 
     # 1. Recupero Dati Tenant, Customer e Conversazione
     tenant = get_tenant_by_whatsapp_number(business_phone)
