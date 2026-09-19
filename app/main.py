@@ -14,7 +14,7 @@ from fastapi.responses import PlainTextResponse
 from app.config import Config
 from app.message_buffer import message_buffer
 from app.web.routes import router as web_router
-from app.webhook_new_pipeline import handle_whatsapp_message_new_pipeline
+from app.webhook import handle_whatsapp_message
 
 app = FastAPI(
     title="AI Booking",
