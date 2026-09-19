@@ -73,6 +73,7 @@ def reset_for_new_operation(context: ConversationContext) -> ConversationContext
     context.operation.target_appointment_id = None
     return context
 
+
 def has_search_criteria(context: ConversationContext) -> bool:
     """
     True solo se c'è un GIORNO abbastanza specifico da cercare subito gli slot.
