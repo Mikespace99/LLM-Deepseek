@@ -1,12 +1,4 @@
 """
-Punto di ingresso della NUOVA pipeline dal webhook WhatsApp.
-
-Isolato apposta: main.py fa solo UNA chiamata a should_use_new_pipeline()
-e, se True, delega tutto qui e ritorna. Nessun'altra riga di main.py né
-di process_messages viene eseguita per queste conversazioni: le due
-pipeline sono completamente indipendenti, quindi un baco qui non può
-in alcun modo rompere il comportamento esistente per tutti gli altri
-utenti.
 """
 
 from __future__ import annotations
@@ -27,19 +19,6 @@ _KNOWLEDGE_TEXT_KEYS = ("services_text", "locations_text", "working_hours_text")
 # Intent che non richiedono alcuna verifica (ricerca/lettura dati): un
 # saluto puro non merita un "un attimo, verifico" prima della risposta.
 _CHITCHAT_INTENTS_NO_ACK = {Intent.GREETING, Intent.THANKS}
-
-
-def should_use_new_pipeline(phone: str) -> bool:
-    """
-    Unico punto di decisione. Vuoto per default (vedi Config): finché
-    non viene esplicitamente valorizzato NEW_PIPELINE_TEST_PHONES,
-    ritorna sempre False e il comportamento attuale resta invariato.
-    """
-    if not Config.NEW_PIPELINE_TEST_PHONES:
-        return False
-    test_phones = {normalize_phone(p) for p in Config.NEW_PIPELINE_TEST_PHONES}
-    return normalize_phone(phone) in test_phones
-
 
 async def _send_sequence(outgoing: OutgoingMessage, phone: str, token: str, phone_id: str) -> None:
     """Invia i messaggi in ordine; bottoni/lista solo sull'ultimo. Ripiega su testo se l'interattivo fallisce."""
@@ -63,7 +42,7 @@ async def _send_sequence(outgoing: OutgoingMessage, phone: str, token: str, phon
             await send_whatsapp_message(phone, text, token, phone_id)
 
 
-async def handle_whatsapp_message_new_pipeline(
+async def handle_whatsapp_message(
     phone: str,
     business_phone: str,
     combined_text: str,
