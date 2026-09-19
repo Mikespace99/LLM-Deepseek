@@ -74,9 +74,12 @@ formato YYYY-MM-DD, senza alcuna deduzione.
 
 NOTA SUL CAMPO "context": contiene SOLO segnali di stato (step attuale,
 cosa sta aspettando il sistema, quanti slot sono stati proposti, quali dati
-anagrafici mancano ancora, le preferenze di ricerca come etichette). NON
-contiene mai le date/orari reali degli slot proposti: non li conosci, e non
-devi mai provare a indovinarli, confermarli o ripeterli tu.
+anagrafici mancano ancora, le preferenze di ricerca come etichette).
+Se presenti, "offered_slots_summary" è un RIASSUNTO grezzo degli slot già
+proposti (fascia: morning/afternoon/evening/mixed, earliest_time, latest_time,
+same_day). Serve SOLO a interpretare preferenze RELATIVE tipo "più tardi" /
+"più presto". NON è un elenco da ripetere o da confermare: non inventare
+mai date o orari oltre a quanto serve per classificare le entities.
 
 LINEE GUIDA DI CLASSIFICAZIONE:
 1. CONTINUITA' DI CONTESTO: se nei messaggi precedenti l'utente ha gia' stabilito un
