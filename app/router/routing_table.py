@@ -28,7 +28,7 @@ preciso, non a un segnale generico.
 
 from app.context.models import BookingStatus, ConversationContext, ConversationStep, Intent, OperationType, SystemResult
 from app.flows import booking, reschedule
-from app.flows.common import abandon_current_request
+from app.flows.common import abandon_current_request, reject_offered_slots
 
 _FLOW_BY_OPERATION = {
     OperationType.CREATE: booking,
@@ -84,6 +84,16 @@ UNIVERSAL_RULES = [
     (
         lambda ctx: ctx.conversation.current_intent == Intent.CONFIRM and ctx.confirmation.required,
         _generic("confirm"),
+    ),
+    (
+        # REJECT della lista di slot proposti (non siamo in fase di
+        # conferma di un singolo slot). Va PRIMA del reject_confirmation.
+        lambda ctx: (
+            ctx.conversation.current_intent == Intent.REJECT
+            and bool(ctx.offered_slots)
+            and not ctx.confirmation.required
+        ),
+        reject_offered_slots,
     ),
     (
         lambda ctx: ctx.conversation.current_intent == Intent.REJECT and ctx.confirmation.required,
