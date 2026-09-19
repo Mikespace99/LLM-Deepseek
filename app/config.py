@@ -35,14 +35,3 @@ class Config:
 
     # Debounce: secondi di attesa dopo l'ultimo messaggio prima di processare
     MESSAGE_DEBOUNCE_SECONDS = float(os.getenv("MESSAGE_DEBOUNCE_SECONDS", "10"))
-
-    # --- Nuova pipeline (in test) ---
-    # Numeri di telefono (formato E.164, separati da virgola) che devono
-    # passare dalla nuova pipeline (orchestrator.py) invece di quella
-    # attuale. Vuoto di default: finché non lo si valorizza esplicitamente,
-    # il comportamento in produzione non cambia di una virgola.
-    NEW_PIPELINE_TEST_PHONES = [
-        p.strip()
-        for p in os.getenv("NEW_PIPELINE_TEST_PHONES", "").split(",")
-        if p.strip()
-    ]
