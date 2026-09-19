@@ -11,7 +11,7 @@ dimostrare e testare che tutti i pezzi nuovi si incastrino correttamente
 prima del collegamento definitivo.
 
 Il saluto orario NON viene più aggiunto qui: il messaggio di "un attimo,
-verifico" viene inviato immediatamente da webhook_new_pipeline.py, PRIMA
+verifico" viene inviato immediatamente da webhook.py, PRIMA
 di chiamare handle_message - così l'utente riceve un segnale subito,
 non solo insieme alla risposta finale (che può richiedere una ricerca).
 """
