@@ -22,12 +22,6 @@ class Config:
     # sui webhook in ingresso (protegge da payload falsi/iniettati).
     WHATSAPP_APP_SECRET = os.getenv("WHATSAPP_APP_SECRET")
 
-    # n8n webhooks
-    N8N_BOOKING_WEBHOOK = os.getenv("N8N_BOOKING_WEBHOOK")
-    N8N_RESCHEDULE_WEBHOOK = os.getenv("N8N_RESCHEDULE_WEBHOOK")
-    N8N_CANCEL_WEBHOOK = os.getenv("N8N_CANCEL_WEBHOOK")
-    N8N_AVAILABILITY_WEBHOOK = os.getenv("N8N_AVAILABILITY_WEBHOOK")
-
     # Business rules
     DEFAULT_SLOT_SEARCH_DAYS = int(os.getenv("DEFAULT_SLOT_SEARCH_DAYS", "30"))
     CONVERSATION_TIMEOUT_MINUTES = int(os.getenv("CONVERSATION_TIMEOUT_MINUTES", "15"))
