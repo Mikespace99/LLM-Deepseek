@@ -101,12 +101,35 @@ def show_week_overview(
     tenant: dict,
     knowledge: dict,
 ) -> tuple[ConversationContext, SystemResult]:
+    """
+    Panoramica giorni disponibili. Rispetta:
+    - period (this_week / next_week / today / tomorrow / aperto)
+    - time_preference (morning / afternoon): filtra i giorni che hanno
+      quella fascia; non salta agli slot orari.
+    """
     context = context.model_copy(deep=True)
 
     today = today_in_tz(tenant.get("timezone"))
     this_monday = today - timedelta(days=today.weekday())
     this_sunday = this_monday + timedelta(days=6)
+    next_monday = this_sunday + timedelta(days=1)
     next_sunday = this_sunday + timedelta(days=7)
+
+    period = context.search.period
+    time_pref = context.search.time_preference  # morning | afternoon | evening | None
+
+    # Finestra date in base al periodo richiesto (se c'è).
+    if period == "next_week":
+        date_from, date_to = next_monday, next_sunday
+    elif period == "this_week":
+        date_from, date_to = today, this_sunday
+    elif period == "today":
+        date_from = date_to = today
+    elif period == "tomorrow":
+        date_from = date_to = today + timedelta(days=1)
+    else:
+        # Nessun periodo o "any": panoramica su questa + prossima settimana.
+        date_from, date_to = today, next_sunday
 
     base_data = {
         "service": context.service.value,
@@ -115,8 +138,15 @@ def show_week_overview(
 
     try:
         two_weeks = engine.search_available_days(
-            tenant, knowledge,
-            {**base_data, "preferences": {"date_from": today.isoformat(), "date_to": next_sunday.isoformat()}},
+            tenant,
+            knowledge,
+            {
+                **base_data,
+                "preferences": {
+                    "date_from": date_from.isoformat(),
+                    "date_to": date_to.isoformat(),
+                },
+            },
             max_days=14,
         )
     except Exception as exc:
@@ -124,13 +154,23 @@ def show_week_overview(
         return context, SystemResult(success=False, error_code="TECHNICAL_ERROR")
 
     available_days = two_weeks.get("available_days") or []
+
+    # Filtro fascia: tieni solo i giorni che hanno quella disponibilità.
+    if time_pref == "morning":
+        available_days = [d for d in available_days if d.get("morning")]
+    elif time_pref == "afternoon":
+        available_days = [d for d in available_days if d.get("afternoon")]
+    # evening: l'engine espone solo morning/afternoon; non filtriamo qui.
+
     this_week = [d for d in available_days if d["date"] <= this_sunday.isoformat()]
     next_week = [d for d in available_days if d["date"] > this_sunday.isoformat()]
 
     first_available = None
     if not this_week and not next_week:
         try:
-            wide = engine.search_available_days(tenant, knowledge, {**base_data, "preferences": {}}, max_days=1)
+            wide = engine.search_available_days(
+                tenant, knowledge, {**base_data, "preferences": {}}, max_days=1
+            )
         except Exception as exc:
             print(f"[flows.booking.show_week_overview] errore ricerca prima disponibilità: {exc!r}")
             return context, SystemResult(success=False, error_code="TECHNICAL_ERROR")
@@ -153,6 +193,8 @@ def show_week_overview(
             "next_week": next_week[:3],
             "first_available": first_available,
             "this_week_over": _week_effectively_over(knowledge, tenant, today, this_sunday),
+            "time_preference": time_pref,
+            "period": period,
         },
     )
 
