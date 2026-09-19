@@ -1,7 +1,6 @@
 from datetime import datetime, timezone, timedelta
 from app.supabase_client import get_supabase
 from app.config import Config
-from app.constants import WORKFLOW_IDLE, STEP_NONE
 from app.repositories.customer import normalize_phone
 
 
@@ -78,8 +77,8 @@ def create_conversation(tenant_id: str, customer_id: str, phone_number: str) -> 
             "customer_id": customer_id,
             "phone_number": phone_number,
             "status": "active",
-            "workflow": WORKFLOW_IDLE,
-            "step": STEP_NONE,
+            "workflow": "idle",
+            "step": "none",
             "collected_data": {},
             "recent_messages": [],
             "retry_count": 0,
