@@ -67,6 +67,11 @@ def resolve_response_type(
     if system_result.data.get("next") == "abandoned":
         return ResponseType.REQUEST_ABANDONED
 
+    # Dopo REJECT della lista di slot: chiedi preferenze alternative
+    # (data e/o orario), non mostrare di nuovo la panoramica settimanale.
+    if system_result.data.get("next") == "ask_alternative_preference":
+        return ResponseType.ASK_SEARCH_PREFERENCE
+
     if step == ConversationStep.COMPLETED:
         return _COMPLETED_TO_RESPONSE_TYPE.get(context.operation.type, ResponseType.INFORMATION)
 
@@ -77,6 +82,8 @@ def resolve_response_type(
         # Stesso step, significato diverso: per BOOK mostriamo la
         # panoramica concreta; per RESCHEDULE (e tutto il resto) resta
         # la domanda semplice "ha una preferenza?".
+        # Eccezione: se veniamo da un reject di lista, già gestito sopra
+        # con ask_alternative_preference.
         if context.operation.type == OperationType.CREATE:
             return ResponseType.SHOW_WEEK_OVERVIEW
         return ResponseType.ASK_SEARCH_PREFERENCE
