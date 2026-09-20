@@ -792,6 +792,48 @@ def _generate_and_filter_slots(
 
         filtered = [s for s in filtered if not _is_excluded(s)]
 
+    # Blacklist: slot (e date) già rifiutati dall'utente in questa conversazione.
+    prefs = ctx.get("preferences") or {}
+    excluded_slots = set(prefs.get("excluded_slots") or [])
+    excluded_dates = set(prefs.get("excluded_dates") or [])
+
+    if excluded_slots or excluded_dates:
+        def _is_excluded(slot) -> bool:
+            dt = slot["start"]
+            date_str = dt.strftime("%Y-%m-%d")
+            time_str = f"{dt.hour:02d}:{dt.minute:02d}"
+            slot_id = f"{date_str}_{time_str}"
+            if slot_id in excluded_slots:
+                return True
+            if date_str in excluded_dates:
+                return True
+            return False
+
+        filtered = [s for s in filtered if not _is_excluded(s)]
+
+    # ============================================================
+    # NUOVO: "più tardi" → prendi solo orari DOPO after_time
+    # ============================================================
+    after_time = prefs.get("after_time")  # es. "10:00"
+    if after_time:
+        try:
+            after_h, after_m = _parse_time(after_time)
+            after_minutes = after_h * 60 + after_m
+
+            filtered = [
+                s for s in filtered
+                if (s["start"].hour * 60 + s["start"].minute) > after_minutes
+            ]
+            print(
+                f"[ENGINE] after_time={after_time} -> "
+                f"rimangono {len(filtered)} slot dopo il filtro"
+            )
+        except Exception as e:
+            print(f"[ENGINE] after_time non valido ({after_time}): {e}")
+
+    top = filtered[:MAX_CANDIDATE_SLOTS]
+
+    
     top = filtered[:MAX_CANDIDATE_SLOTS]
 
     candidate_slots = []
