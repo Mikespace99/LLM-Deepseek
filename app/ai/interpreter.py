@@ -7,10 +7,10 @@ Context Manager e Router saranno pronti a consumare `AI1Result`.
 
 Principio guida invariato rispetto al vecchio parser:
 l'AI CLASSIFICA e riporta etichette categoriche, non calcola MAI a mente
-una data relativa (period/weekday/week_part restano etichette; a tradurle
-in date_from/date_to esatti ci pensa un resolver Python deterministico,
-non l'AI). Questo modulo si limita a interpretare: non decide nulla e
-non scrive context_updates gia' "risolti".
+una data relativa (period/weekday/week_part/month restano etichette; a
+tradurle in date_from/date_to esatti ci pensa un resolver Python
+deterministico, non l'AI). Questo modulo si limita a interpretare: non
+decide nulla e non scrive context_updates gia' "risolti".
 
 Rispetto al vecchio ai/intent_parser.py, unifica in un solo contratto
 (AI1Result) sia il classificatore principale ("run_step1_analysis") sia
@@ -48,6 +48,9 @@ Restituisci TASSATIVAMENTE ed ESCLUSIVAMENTE un JSON con questa struttura:
     "period": "today" | "tomorrow" | "this_week" | "next_week" | "any" | null,
     "week_part": "start" | "mid" | "weekend" | null,
     "weekday": "lunedi" | "martedi" | "mercoledi" | "giovedi" | "venerdi" | "sabato" | "domenica" | null,
+    "month": "gennaio" | "febbraio" | "marzo" | "aprile" | "maggio" | "giugno" |
+             "luglio" | "agosto" | "settembre" | "ottobre" | "novembre" | "dicembre" | null,
+    "month_part": "start" | "mid" | "end" | "whole" | null,
     "date_from": "YYYY-MM-DD" | null,
     "date_to": "YYYY-MM-DD" | null,
     "time_preference": "morning" | "afternoon" | "evening" | "exact" | null,
@@ -65,12 +68,14 @@ Restituisci TASSATIVAMENTE ed ESCLUSIVAMENTE un JSON con questa struttura:
 
 REGOLA FONDAMENTALE - NON FARE MAI CALCOLI DI CALENDARIO:
 Non devi MAI calcolare a mente una data relativa. Riconosci e classifica soltanto,
-usando le etichette categoriche (period / weekday / week_part). Sara' un componente
-Python deterministico, con la vera data di oggi ("oggi_iso" nel payload), a tradurre
-queste etichette in date esatte.
+usando le etichette categoriche (period / weekday / week_part / month / month_part).
+Sara' un componente Python deterministico, con la vera data di oggi ("oggi_iso" nel payload),
+a tradurre queste etichette in date esatte.
 Usa "date_from"/"date_to" SOLO se il cliente ha gia' detto per intero una data assoluta
-esplicita (es. "il 15 settembre"): in quel caso limitati a TRASCRIVERE quella data in
-formato YYYY-MM-DD, senza alcuna deduzione.
+esplicita (es. "il 15 settembre" oppure "dal 3 al 5 ottobre"): in quel caso limitati a
+TRASCRIVERE quella data in formato YYYY-MM-DD, senza alcuna deduzione.
+Per i riferimenti a un mese ("inizio ottobre", "a novembre", "fine marzo") NON usare
+date_from/date_to: usa solo month + month_part.
 
 NOTA SUL CAMPO "context": contiene SOLO segnali di stato (step attuale,
 cosa sta aspettando il sistema, quanti slot sono stati proposti, quali dati
@@ -97,9 +102,9 @@ LINEE GUIDA DI CLASSIFICAZIONE:
    prenotare", "quando siete liberi?"), senza che esista gia' un appuntamento target.
    IMPORTANTE: se il cliente chiede "c'è disponibilità", "avete posto", "siete liberi"
    insieme a un periodo o a un riferimento temporale (prossima settimana, domani,
-   venerdì, mattina, ecc.) OPPURE insieme alla parola "appuntamento" / "prenotare",
-   l'intent è BOOK (non ASK_INFORMATION). Valorizza period/weekday/time_preference
-   come di consueto (es. "prossima settimana" -> period="next_week").
+   venerdì, mattina, inizio ottobre, ecc.) OPPURE insieme alla parola "appuntamento"
+   / "prenotare", l'intent è BOOK (non ASK_INFORMATION). Valorizza period/weekday/
+   time_preference/month/month_part come di consueto.
    ASK_INFORMATION resta solo per domande su prezzi, indirizzo, parcheggio, servizi,
    orari di apertura dello studio in generale - NON per cercare uno slot da prenotare.
 5. RESCHEDULE: l'utente vuole spostare/cambiare un appuntamento GIA' fissato. Non
@@ -139,12 +144,28 @@ LINEE GUIDA DI CLASSIFICAZIONE:
     "dopo pranzo", "verso le 16", ecc. usa la fascia o exact_time corrispondente.
     In ogni caso intent = CHANGE_PREFERENCE (o SELECT_SLOT se sceglie un numero/orario
     tra quelli proposti).
-    Se il cliente dice "più tardi", "più tardi mattina", "tarda mattinata", "più tardi in mattinata",
-    "verso le 11", "dopo le 10" ecc. mentre offered_slots_summary.time_band = "morning":
+    Se il cliente dice "più tardi", "più tardi mattina", "tarda mattinata",
+    "più tardi in mattinata", "verso le 11", "dopo le 10" ecc. mentre
+    offered_slots_summary.time_band = "morning":
        - intent = CHANGE_PREFERENCE
        - time_preference = "morning"
        - se indica un orario preciso, valorizza anche exact_time
     NON allargare la ricerca ad altri giorni: resta sullo stesso giorno già selezionato.
+
+14. MESI E PARTI DEL MESE:
+    Se il cliente indica un mese ("ottobre", "a novembre", "inizio ottobre",
+    "primi di marzo", "metà gennaio", "fine giugno", "ad ottobre", "in settembre"):
+    - NON usare period = this_week / next_week / today / tomorrow per quel riferimento
+    - valorizza "month" col nome del mese in italiano minuscolo (es. "ottobre")
+    - valorizza "month_part":
+        - "inizio", "primi di", "all'inizio di", "ad inizio" → "start"
+        - "metà", "a metà" → "mid"
+        - "fine", "ultimi di", "alla fine di", "a fine" → "end"
+        - solo il mese ("a ottobre", "in ottobre", "ad ottobre") → "whole"
+    - lascia date_from e date_to a null: le date le calcola Python
+    - intent normalmente BOOK o CHANGE_PREFERENCE come da altre regole
+    NON inventare mai date YYYY-MM-DD per i mesi: solo month + month_part.
+
 Rispondi solo con il JSON, nessun testo di contorno.
 """.strip()
 
