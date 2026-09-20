@@ -139,8 +139,12 @@ LINEE GUIDA DI CLASSIFICAZIONE:
     "dopo pranzo", "verso le 16", ecc. usa la fascia o exact_time corrispondente.
     In ogni caso intent = CHANGE_PREFERENCE (o SELECT_SLOT se sceglie un numero/orario
     tra quelli proposti).
-
-
+    Se il cliente dice "più tardi", "più tardi mattina", "tarda mattinata", "più tardi in mattinata",
+    "verso le 11", "dopo le 10" ecc. mentre offered_slots_summary.time_band = "morning":
+       - intent = CHANGE_PREFERENCE
+       - time_preference = "morning"
+       - se indica un orario preciso, valorizza anche exact_time
+    NON allargare la ricerca ad altri giorni: resta sullo stesso giorno già selezionato.
 Rispondi solo con il JSON, nessun testo di contorno.
 """.strip()
 
