@@ -163,8 +163,34 @@ LINEE GUIDA DI CLASSIFICAZIONE:
         - "fine", "ultimi di", "alla fine di", "a fine" → "end"
         - solo il mese ("a ottobre", "in ottobre", "ad ottobre") → "whole"
     - lascia date_from e date_to a null: le date le calcola Python
+    - imposta period = null (non this_week / next_week)
     - intent normalmente BOOK o CHANGE_PREFERENCE come da altre regole
     NON inventare mai date YYYY-MM-DD per i mesi: solo month + month_part.
+
+    ESEMPI OBBLIGATORI (mese) — segui esattamente questo schema:
+    - "inizio ottobre" / "ad inizio ottobre" / "primi di ottobre" / "all'inizio di ottobre"
+      → month="ottobre", month_part="start", period=null
+    - "metà marzo" / "a metà marzo" / "verso metà marzo"
+      → month="marzo", month_part="mid", period=null
+    - "fine novembre" / "a fine novembre" / "ultimi di novembre"
+      → month="novembre", month_part="end", period=null
+    - "a ottobre" / "in ottobre" / "ad ottobre" / "per ottobre"
+      → month="ottobre", month_part="whole", period=null
+    - "inizio del mese prossimo" / "primi del mese prossimo"
+      → calcola il mese successivo rispetto a oggi_iso, valorizza quel month
+        in italiano minuscolo + month_part="start", period=null
+        (es. se oggi_iso è a settembre → month="ottobre", month_part="start")
+    - "mese prossimo" / "il mese prossimo" (senza inizio/metà/fine)
+      → mese successivo a oggi_iso + month_part="whole", period=null
+    - "questo mese"
+      → mese di oggi_iso + month_part="whole" (o start/mid/end se specificato)
+      nel dubbio altrimenti needs_clarification=true
+    - "prossima settimana" (senza mese)
+      → period="next_week", month=null, month_part=null
+    - "questa settimana" (senza mese)
+      → period="this_week", month=null, month_part=null
+
+    Se nel messaggio c'è un nome di mese, è VIETATO usare period=this_week o next_week.
 
 Rispondi solo con il JSON, nessun testo di contorno.
 """.strip()
