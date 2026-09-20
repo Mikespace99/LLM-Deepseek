@@ -201,8 +201,24 @@ def run_availability_search(
 
 
 def build_search_collected_data(context: ConversationContext) -> dict:
-    """Converte SearchCriteria + service nel dict "preferences" atteso da engine._compute_search_window."""
+    """
+    Converte SearchCriteria + service nel dict "preferences" atteso dall'engine.
+    - excluded_slots: blacklist persistente (search) + slot appena proposti
+    - after_time: se ci sono slot già mostrati, cerca solo orari successivi
+    """
     search = context.search
+
+    # 1) blacklist già salvata nel contesto (es. da REJECT)
+    excluded = set(search.excluded_slots or [])
+
+    # 2) aggiungi gli slot attualmente proposti (caso "più tardi")
+    for o in context.offered_slots:
+        excluded.add(f"{o.slot.date.isoformat()}_{o.slot.time.strftime('%H:%M')}")
+
+    after_time = None
+    if context.offered_slots:
+        after_time = max(o.slot.time for o in context.offered_slots).strftime("%H:%M")
+
     return {
         "service": context.service.value,
         "location_id": context.professional.location_id if context.professional else None,
@@ -215,40 +231,11 @@ def build_search_collected_data(context: ConversationContext) -> dict:
             "date": search.preferred_date.isoformat() if search.preferred_date else None,
             "time_preference": search.time_preference,
             "exact_time": search.preferred_time.strftime("%H:%M") if search.preferred_time else None,
-            # Blacklist: slot (e date) già rifiutati dall'utente in questa conversazione.
-            "excluded_slots": list(search.excluded_slots or []),
+            "excluded_slots": list(excluded),
             "excluded_dates": [d.isoformat() for d in (search.excluded_dates or [])],
+            "after_time": after_time,
         },
     }
-
-def build_search_collected_data(context: ConversationContext) -> dict:
-    search = context.search
-    excluded = [
-        f"{o.slot.date.isoformat()}_{o.slot.time.strftime('%H:%M')}"
-        for o in context.offered_slots
-    ]
-    return {
-        "service": context.service.value,
-        "location_id": context.professional.location_id if context.professional else None,
-        "preferences": {
-            "period": search.period,
-            "weekday": search.preferred_weekday,
-            "week_part": search.week_part,
-            "date_from": search.date_from.isoformat() if search.date_from else None,
-            "date_to": search.date_to.isoformat() if search.date_to else None,
-            "date": search.preferred_date.isoformat() if search.preferred_date else None,
-            "time_preference": search.time_preference,
-            "exact_time": search.preferred_time.strftime("%H:%M") if search.preferred_time else None,
-            "excluded_slots": excluded,
-            # se ci sono già slot, cerca dopo l'ultimo
-            "after_time": (
-                max(o.slot.time for o in context.offered_slots).strftime("%H:%M")
-                if context.offered_slots else None
-            ),
-        },
-    }
-
-
 
 
 
