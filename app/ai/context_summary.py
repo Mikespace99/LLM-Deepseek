@@ -67,7 +67,29 @@ def _summarize_offered_slots(offered: list[OfferedSlot]) -> dict | None:
 def build_ai1_input(context: ConversationContext) -> dict:
     c = context.conversation
 
-    offered_summary = _summarize_offered_slots(context.offered_slots)
+    offered_slots_summary = None
+    if context.offered_slots:
+        times = [o.slot.time for o in context.offered_slots]
+        earliest = min(times)
+        latest = max(times)
+
+        def _band(t):
+            if t.hour < 12:
+                return "morning"
+            if t.hour < 18:
+                return "afternoon"
+            return "evening"
+
+        bands = {_band(t) for t in times}
+        time_band = bands.pop() if len(bands) == 1 else "mixed"
+
+        offered_slots_summary = {
+            "count": len(context.offered_slots),
+            "time_band": time_band,
+            "earliest_time": earliest.strftime("%H:%M"),
+            "latest_time": latest.strftime("%H:%M"),
+            "same_day": len({o.slot.date for o in context.offered_slots}) == 1,
+        }
 
     return {
         "current_step": c.current_step.value,
@@ -75,8 +97,7 @@ def build_ai1_input(context: ConversationContext) -> dict:
         "pending_action": c.pending_action.value,
 
         "offered_slots_count": len(context.offered_slots),
-        # Riassunto grezzo (fascia + min/max). Assente se non ci sono slot.
-        "offered_slots_summary": offered_summary,
+        "offered_slots_summary": offered_slots_summary,
 
         "confirmation_required": context.confirmation.required,
 
@@ -86,8 +107,6 @@ def build_ai1_input(context: ConversationContext) -> dict:
             "email": bool(context.customer.email.value),
         },
 
-        # Etichette, non date calcolate: coerente con la regola "l'AI
-        # non fa mai calcoli di calendario".
         "search_preferences": {
             "period": context.search.period,
             "week_part": context.search.week_part,
