@@ -84,14 +84,19 @@ async def handle_whatsapp_message(
         # ============================================================
         if expired:
             # La vecchia conversazione è già stata chiusa dal repository.
-            # Mandiamo un messaggio chiaro e NON interpretiamo il messaggio
-            # del cliente (che tipicamente è una risposta a slot ormai scaduti).
+            # Mandiamo un messaggio chiaro con bottoni di scelta e NON
+            # interpretiamo il messaggio del cliente (che tipicamente è
+            # una risposta a slot ormai scaduti).
             outgoing = OutgoingMessage(
                 texts=[
-                    "La richiesta precedente è scaduta perché è passato troppo tempo. "
-                    "Può dirmi di nuovo di cosa ha bisogno? "
-                    "(ad esempio: vuole prenotare, spostare o cancellare un appuntamento)"
-                ]
+                    "Richiesta scaduta per inattività. \n\n"
+                    "Dica di nuovo cosa desidera fare:"
+                ],
+                buttons=[
+                    ("book", "Prenotare"),
+                    ("reschedule", "Spostare"),
+                    ("cancel", "Cancellare"),
+                ],
             )
 
             # Salviamo il nuovo context (vuoto) e usciamo subito
