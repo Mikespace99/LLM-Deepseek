@@ -221,6 +221,36 @@ def build_search_collected_data(context: ConversationContext) -> dict:
         },
     }
 
+def build_search_collected_data(context: ConversationContext) -> dict:
+    search = context.search
+    excluded = [
+        f"{o.slot.date.isoformat()}_{o.slot.time.strftime('%H:%M')}"
+        for o in context.offered_slots
+    ]
+    return {
+        "service": context.service.value,
+        "location_id": context.professional.location_id if context.professional else None,
+        "preferences": {
+            "period": search.period,
+            "weekday": search.preferred_weekday,
+            "week_part": search.week_part,
+            "date_from": search.date_from.isoformat() if search.date_from else None,
+            "date_to": search.date_to.isoformat() if search.date_to else None,
+            "date": search.preferred_date.isoformat() if search.preferred_date else None,
+            "time_preference": search.time_preference,
+            "exact_time": search.preferred_time.strftime("%H:%M") if search.preferred_time else None,
+            "excluded_slots": excluded,
+            # se ci sono già slot, cerca dopo l'ultimo
+            "after_time": (
+                max(o.slot.time for o in context.offered_slots).strftime("%H:%M")
+                if context.offered_slots else None
+            ),
+        },
+    }
+
+
+
+
 
 def slots_to_offered(candidate_slots: list[dict]) -> list[OfferedSlot]:
     """
