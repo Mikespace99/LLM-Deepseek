@@ -68,6 +68,8 @@ _SEARCH_ENTITY_KEYS = (
     "period",
     "week_part",
     "weekday",
+    "month",        # <-- aggiungi
+    "month_part",   # <-- aggiungi
     "time_preference",
     "exact_time",
     "date_from",
