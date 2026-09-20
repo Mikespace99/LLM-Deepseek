@@ -27,6 +27,68 @@ from app.context.models import SearchCriteria
 
 from app.utils.it_dates import normalize_weekday
 
+
+_MONTHS = {
+    "gennaio": 1,
+    "febbraio": 2,
+    "marzo": 3,
+    "aprile": 4,
+    "maggio": 5,
+    "giugno": 6,
+    "luglio": 7,
+    "agosto": 8,
+    "settembre": 9,
+    "ottobre": 10,
+    "novembre": 11,
+    "dicembre": 12,
+}
+
+
+def _last_day_of_month(year: int, month: int) -> int:
+    if month == 12:
+        return 31
+    return (date(year, month + 1, 1) - timedelta(days=1)).day
+
+
+def _resolve_month_window(
+    month_name: str,
+    month_part: str | None,
+    today: date,
+) -> tuple[date, date] | None:
+    """
+    Traduce month + month_part in un range di date.
+    Policy:
+      start  → giorni 1–10
+      mid    → giorni 11–20
+      end    → giorno 21 → fine mese
+      whole / None → tutto il mese
+    Anno: se il mese (intero) è già alle spalle rispetto a oggi → anno successivo.
+    """
+    m = _MONTHS.get((month_name or "").strip().lower())
+    if not m:
+        return None
+
+    year = today.year
+    # Se siamo già oltre quel mese (o nello stesso mese ma oltre la fine del range "start"
+    # non serve complicare: se il 1° del mese è prima di oggi e non siamo in quel mese, anno+1)
+    first_of_month = date(year, m, 1)
+    if first_of_month < date(today.year, today.month, 1):
+        year += 1
+        first_of_month = date(year, m, 1)
+
+    last = _last_day_of_month(year, m)
+    part = (month_part or "whole").strip().lower()
+
+    if part == "start":
+        return date(year, m, 1), date(year, m, min(10, last))
+    if part == "mid":
+        return date(year, m, min(11, last)), date(year, m, min(20, last))
+    if part == "end":
+        return date(year, m, min(21, last)), date(year, m, last)
+    # whole
+    return date(year, m, 1), date(year, m, last)
+
+
 _WEEKDAY_NAME_TO_ISO = {
     "lunedì": 1,
     "martedì": 2,
@@ -140,6 +202,42 @@ def resolve_search_criteria(
 
         return updated
 
+    # --- Mese esplicito (inizio/metà/fine/tutto) ---
+    if entities.get("month"):
+        window = _resolve_month_window(
+            entities["month"],
+            entities.get("month_part"),
+            today,
+        )
+        if window:
+            from_date, to_date = window
+            updated.date_from = from_date
+            updated.date_to = to_date
+            updated.preferred_date = None
+            updated.period = None
+            updated.week_part = None
+            updated.preferred_weekday = None
+
+            # fascia oraria se presente nel messaggio
+            if entities.get("time_preference"):
+                updated.time_preference = entities["time_preference"]
+            if entities.get("exact_time"):
+                updated.preferred_time = _parse_hhmm(entities["exact_time"])
+                updated.time_from = updated.time_to = None
+            elif updated.time_preference in _TIME_WINDOWS:
+                start_h, end_h = _TIME_WINDOWS[updated.time_preference]
+                updated.time_from = _hour(start_h)
+                updated.time_to = _hour(end_h)
+                updated.preferred_time = None
+
+            print(
+                f"[RESOLVER] month={entities.get('month')} "
+                f"part={entities.get('month_part')} → {from_date}..{to_date}"
+            )
+            return updated
+
+
+  
     # --- 1. Aggiorna le etichette grezze, solo se il messaggio le porta ---
     if entities.get("period"):
         updated.period = entities["period"]
