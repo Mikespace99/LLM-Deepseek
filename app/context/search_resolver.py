@@ -100,6 +100,46 @@ def resolve_search_criteria(
     """
     updated = current.model_copy(deep=True)
 
+    # ============================================================
+    # CASO SPECIALE: giorno già scelto + solo cambio fascia oraria
+    # ============================================================
+    already_has_specific_day = (
+        current.date_from is not None
+        and current.date_to is not None
+        and current.date_from == current.date_to
+    )
+
+    only_time_change = (
+        (entities.get("time_preference") or entities.get("exact_time"))
+        and not entities.get("period")
+        and not entities.get("weekday")
+        and not entities.get("week_part")
+        and not entities.get("date_from")
+    )
+
+    if already_has_specific_day and only_time_change:
+        # Blocca il giorno già scelto
+        updated.date_from = current.date_from
+        updated.date_to = current.date_to
+        updated.preferred_date = current.date_from
+
+        # Aggiorna solo l'orario
+        if entities.get("time_preference"):
+            updated.time_preference = entities["time_preference"]
+
+        if entities.get("exact_time"):
+            updated.preferred_time = _parse_hhmm(entities["exact_time"])
+            updated.time_preference = "exact"
+            updated.time_from = None
+            updated.time_to = None
+        elif updated.time_preference in _TIME_WINDOWS:
+            start_h, end_h = _TIME_WINDOWS[updated.time_preference]
+            updated.time_from = _hour(start_h)
+            updated.time_to = _hour(end_h)
+            updated.preferred_time = None
+
+        return updated
+
     # --- 1. Aggiorna le etichette grezze, solo se il messaggio le porta ---
     if entities.get("period"):
         updated.period = entities["period"]
@@ -110,7 +150,7 @@ def resolve_search_criteria(
 
     if entities.get("weekday"):
         updated.preferred_weekday = normalize_weekday(entities["weekday"]) or entities["weekday"]
-      
+
     if entities.get("time_preference"):
         updated.time_preference = entities["time_preference"]
 
