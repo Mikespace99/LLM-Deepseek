@@ -1,4 +1,5 @@
 """
+Webhook WhatsApp – pipeline nuova.
 """
 
 from __future__ import annotations
@@ -16,13 +17,66 @@ from app.repositories.tenant import get_tenant_by_whatsapp_number, get_tenant_kn
 
 _KNOWLEDGE_TEXT_KEYS = ("services_text", "locations_text", "working_hours_text")
 
-# Intent che non richiedono alcuna verifica (ricerca/lettura dati): un
-# saluto puro non merita un "un attimo, verifico" prima della risposta.
+# Intent che non richiedono verifica / ricerca.
 _CHITCHAT_INTENTS_NO_ACK = {Intent.GREETING, Intent.THANKS}
+
+# Intent abbastanza chiari da far partire subito il flusso operativo.
+_CLEAR_INTENTS = {
+    Intent.BOOK,
+    Intent.RESCHEDULE,
+    Intent.CANCEL,
+    Intent.CHECK_APPOINTMENT,
+    Intent.ASK_INFORMATION,
+}
+
+_MENU_BUTTONS = [
+    ("book", "Voglio prenotare"),
+    ("reschedule", "Voglio spostare"),
+    ("cancel", "Voglio cancellare"),
+]
+
+
+def _build_presentation_text(tenant: dict, knowledge: dict | None = None) -> str:
+    """
+    Presentazione breve e generica (medico, avvocato, ingegnere, ...).
+    Usa business_name + specialty come "professione/titolo" libero.
+    """
+    info = tenant.get("info") or {}
+
+    name = (
+        info.get("doctor_name")
+        or info.get("professional_name")
+        or info.get("display_name")
+        or tenant.get("business_name")
+        or tenant.get("name")
+        or "lo studio"
+    )
+
+    # Campo generico: "Dermatologo", "Avvocato", "Ingegnere"...
+    profession = (
+        tenant.get("specialty")
+        or info.get("profession")
+        or info.get("specialty")
+        or ""
+    ).strip()
+
+    city = (info.get("city") or info.get("studio_city") or "").strip()
+    if not city and knowledge:
+        locations = knowledge.get("locations") or []
+        if locations:
+            city = (locations[0].get("city") or "").strip()
+
+    if profession:
+        line1 = f"Chat ufficiale per la gestione appuntamenti di {name}, {profession}."
+    else:
+        line1 = f"Chat ufficiale per la gestione appuntamenti di {name}."
+
+    line2 = f"Studio a {city}." if city else "Come posso aiutarla?"
+    return f"{line1}\n{line2}"
 
 
 async def _send_sequence(outgoing: OutgoingMessage, phone: str, token: str, phone_id: str) -> None:
-    """Invia i messaggi in ordine; bottoni/lista solo sull'ultimo. Ripiega su testo se l'interattivo fallisce."""
+    """Invia i messaggi in ordine; bottoni/lista solo sull'ultimo."""
     texts = outgoing.texts or [""]
     last_index = len(texts) - 1
 
@@ -52,9 +106,6 @@ async def handle_whatsapp_message(
     conv_row = None
     tenant = None
 
-    # Messaggio di default: usato SOLO se qualcosa va storto prima di
-    # arrivare a una risposta vera. Onesto, non tecnico, e lascia
-    # sempre una via d'uscita al cliente.
     outgoing = OutgoingMessage(
         texts=[
             "Non so rispondere su questo punto: deve chiedere direttamente allo studio. "
@@ -80,26 +131,16 @@ async def handle_whatsapp_message(
         )
 
         # ============================================================
-        # CASO: conversazione precedente scaduta per timeout
+        # Conversazione scaduta per timeout
         # ============================================================
         if expired:
-            # La vecchia conversazione è già stata chiusa dal repository.
-            # Mandiamo un messaggio chiaro con bottoni di scelta e NON
-            # interpretiamo il messaggio del cliente (che tipicamente è
-            # una risposta a slot ormai scaduti).
             outgoing = OutgoingMessage(
                 texts=[
-                    "Richiesta scaduta per inattività. \n\n"
-                    "Dica di nuovo cosa desidera fare:"
+                    "La richiesta precedente è scaduta perché è passato troppo tempo.\n\n"
+                    "Cosa desidera fare adesso?"
                 ],
-                buttons=[
-                    ("book", "Prenotare"),
-                    ("reschedule", "Spostare"),
-                    ("cancel", "Cancellare"),
-                ],
+                buttons=_MENU_BUTTONS,
             )
-
-            # Salviamo il nuovo context (vuoto) e usciamo subito
             try:
                 context_repository.save_context(conv_row["id"], context)
             except Exception as save_err:
@@ -108,25 +149,47 @@ async def handle_whatsapp_message(
             await _send_sequence(outgoing, phone, token, phone_id)
             return
 
-        # Ack IMMEDIATO, prima ancora di avviare la ricerca vera: solo
-        # al primo messaggio di una conversazione nuova, e SOLO se il
-        # messaggio richiede davvero una verifica. Un saluto puro
-        # ("Buongiorno") riceve solo un saluto, non "un attimo verifico"
-        # - non c'è nulla da verificare finché non esprime un'intenzione.
+        knowledge = get_tenant_knowledge(tenant_id) or {}
         precomputed_ai1 = None
-        if context.conversation.status == ConversationStatus.NEW:
+        is_new = context.conversation.status == ConversationStatus.NEW
+
+        # ============================================================
+        # Primo messaggio di una nuova conversazione
+        # ============================================================
+        if is_new:
             precomputed_ai1 = run_ai1_interpreter(
                 combined_text, build_ai1_input(context), tenant.get("timezone")
             )
-            if precomputed_ai1.intent not in _CHITCHAT_INTENTS_NO_ACK:
+            presentation = _build_presentation_text(tenant, knowledge)
+
+            intent_clear = (
+                precomputed_ai1.intent in _CLEAR_INTENTS
+                and not precomputed_ai1.needs_clarification
+            )
+
+            if intent_clear:
+                # Presentazione + ack, poi flusso normale
+                await send_whatsapp_message(phone, presentation, token, phone_id)
                 await send_whatsapp_message(
                     phone,
                     format_ack_message(tenant.get("timezone")),
                     token,
                     phone_id,
                 )
+            else:
+                # Presentazione + menu, stop
+                outgoing = OutgoingMessage(
+                    texts=[presentation + "\n\nCosa desidera fare?"],
+                    buttons=_MENU_BUTTONS,
+                )
+                try:
+                    context_repository.save_context(conv_row["id"], context)
+                except Exception as save_err:
+                    print(f"[new_pipeline] salvataggio context fallito (menu): {save_err}")
 
-        knowledge = get_tenant_knowledge(tenant_id) or {}
+                await _send_sequence(outgoing, phone, token, phone_id)
+                return
+
         knowledge_texts = {key: knowledge.get(key) or "" for key in _KNOWLEDGE_TEXT_KEYS}
 
         context, outgoing = handle_message(
@@ -139,11 +202,6 @@ async def handle_whatsapp_message(
         )
 
     except Exception as exc:
-        # Qualunque errore imprevisto, in QUALUNQUE fase (non solo
-        # nell'interpretazione del messaggio, ma anche nel recupero di
-        # cliente/contesto/tenant) non deve mai lasciare l'utente senza
-        # risposta. L'errore resta visibile nei log per essere corretto;
-        # `outgoing` è già pronto con il messaggio onesto definito sopra.
         print(f"[new_pipeline] ERRORE non gestito: {exc!r}")
 
     if context is not None and conv_row is not None:
