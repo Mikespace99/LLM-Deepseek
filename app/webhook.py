@@ -20,6 +20,7 @@ _KNOWLEDGE_TEXT_KEYS = ("services_text", "locations_text", "working_hours_text")
 # saluto puro non merita un "un attimo, verifico" prima della risposta.
 _CHITCHAT_INTENTS_NO_ACK = {Intent.GREETING, Intent.THANKS}
 
+
 async def _send_sequence(outgoing: OutgoingMessage, phone: str, token: str, phone_id: str) -> None:
     """Invia i messaggi in ordine; bottoni/lista solo sull'ultimo. Ripiega su testo se l'interattivo fallisce."""
     texts = outgoing.texts or [""]
@@ -50,6 +51,7 @@ async def handle_whatsapp_message(
     context = None
     conv_row = None
     tenant = None
+
     # Messaggio di default: usato SOLO se qualcosa va storto prima di
     # arrivare a una risposta vera. Onesto, non tecnico, e lascia
     # sempre una via d'uscita al cliente.
@@ -77,6 +79,30 @@ async def handle_whatsapp_message(
             tenant_id, customer, phone
         )
 
+        # ============================================================
+        # CASO: conversazione precedente scaduta per timeout
+        # ============================================================
+        if expired:
+            # La vecchia conversazione è già stata chiusa dal repository.
+            # Mandiamo un messaggio chiaro e NON interpretiamo il messaggio
+            # del cliente (che tipicamente è una risposta a slot ormai scaduti).
+            outgoing = OutgoingMessage(
+                texts=[
+                    "La richiesta precedente è scaduta perché è passato troppo tempo. "
+                    "Può dirmi di nuovo di cosa ha bisogno? "
+                    "(ad esempio: vuole prenotare, spostare o cancellare un appuntamento)"
+                ]
+            )
+
+            # Salviamo il nuovo context (vuoto) e usciamo subito
+            try:
+                context_repository.save_context(conv_row["id"], context)
+            except Exception as save_err:
+                print(f"[new_pipeline] salvataggio context fallito (expired): {save_err}")
+
+            await _send_sequence(outgoing, phone, token, phone_id)
+            return
+
         # Ack IMMEDIATO, prima ancora di avviare la ricerca vera: solo
         # al primo messaggio di una conversazione nuova, e SOLO se il
         # messaggio richiede davvero una verifica. Un saluto puro
@@ -88,7 +114,12 @@ async def handle_whatsapp_message(
                 combined_text, build_ai1_input(context), tenant.get("timezone")
             )
             if precomputed_ai1.intent not in _CHITCHAT_INTENTS_NO_ACK:
-                await send_whatsapp_message(phone, format_ack_message(tenant.get("timezone")), token, phone_id)
+                await send_whatsapp_message(
+                    phone,
+                    format_ack_message(tenant.get("timezone")),
+                    token,
+                    phone_id,
+                )
 
         knowledge = get_tenant_knowledge(tenant_id) or {}
         knowledge_texts = {key: knowledge.get(key) or "" for key in _KNOWLEDGE_TEXT_KEYS}
@@ -101,6 +132,7 @@ async def handle_whatsapp_message(
             knowledge_texts=knowledge_texts,
             precomputed_ai1=precomputed_ai1,
         )
+
     except Exception as exc:
         # Qualunque errore imprevisto, in QUALUNQUE fase (non solo
         # nell'interpretazione del messaggio, ma anche nel recupero di
