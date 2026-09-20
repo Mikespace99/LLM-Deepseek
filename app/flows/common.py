@@ -166,16 +166,6 @@ def run_availability_search(
     context = context.model_copy(deep=True)
     collected_data = build_search_collected_data(context)
 
-    # Se ci sono già slot proposti e stiamo cercando di nuovo
-    # (es. "più tardi"), parti DOPO l'ultimo orario già mostrato.
-    if context.offered_slots:
-        latest = max(o.slot.time for o in context.offered_slots)
-
-    # Se non c'è già un orario più specifico, usa "dopo l'ultimo proposto"
-    if context.search.preferred_time is None:
-        context.search.preferred_time = latest
-        # non forziamo time_preference="exact": vogliamo "dopo", non "esattamente"
-
     try:
         booking_res = engine.search_availability(tenant=tenant, knowledge=knowledge, collected_data=collected_data)
     except Exception as exc:
