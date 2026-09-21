@@ -74,26 +74,39 @@ def _week_effectively_over(knowledge: dict, tenant: dict, today: date, this_sund
     return now >= latest_end - timedelta(hours=2)
 
 
+
 def start_search(
     context: ConversationContext,
     tenant: dict,
     knowledge: dict,
 ) -> tuple[ConversationContext, SystemResult]:
+    """
+    Intent BOOK/CHANGE_PREFERENCE -> se il cliente ha già indicato un
+    giorno singolo (o un weekday), cerca gli orari. Altrimenti (range,
+    settimana, mese, nessun criterio) mostra la panoramica giorni con
+    fasce orarie, così sceglie da una base concreta.
+    """
     if context.conversation.current_step == ConversationStep.COMPLETED:
         context = reset_for_new_operation(context)
 
     s = context.search
 
-    # Giorno singolo già ancorato → vai agli orari
+    # Giorno singolo già ancorato (o weekday risolto) → orari precisi
     single_day = (
         s.preferred_date is not None
-        or (s.date_from is not None and s.date_to is not None and s.date_from == s.date_to)
+        or s.preferred_weekday is not None
+        or (
+            s.date_from is not None
+            and s.date_to is not None
+            and s.date_from == s.date_to
+        )
     )
     if single_day:
         return run_availability_search(context, tenant, knowledge)
 
     # Range, settimana, mese, o nessun criterio → panoramica giorni
     return show_week_overview(context, tenant, knowledge)
+
 
 def show_week_overview(
     context: ConversationContext,
@@ -102,6 +115,7 @@ def show_week_overview(
 ) -> tuple[ConversationContext, SystemResult]:
     """
     Panoramica giorni disponibili. Rispetta:
+    - date_from/date_to espliciti (es. inizio ottobre) → range custom
     - period (this_week / next_week / today / tomorrow / aperto)
     - time_preference (morning / afternoon): filtra i giorni che hanno
       quella fascia; non salta agli slot orari.
@@ -117,16 +131,14 @@ def show_week_overview(
     period = context.search.period
     time_pref = context.search.time_preference  # morning | afternoon | evening | None
 
-
-    period = context.search.period
-    time_pref = context.search.time_preference
-
     # Se il resolver ha già fissato un range (es. inizio ottobre), usalo.
-    if (
-        context.search.date_from
-        and context.search.date_to
+    explicit_range = (
+        context.search.date_from is not None
+        and context.search.date_to is not None
         and context.search.date_from != context.search.date_to
-    ):
+    )
+
+    if explicit_range:
         date_from = max(context.search.date_from, today)
         date_to = context.search.date_to
     elif period == "next_week":
@@ -138,8 +150,8 @@ def show_week_overview(
     elif period == "tomorrow":
         date_from = date_to = today + timedelta(days=1)
     else:
+        # Nessun periodo o "any": panoramica su questa + prossima settimana.
         date_from, date_to = today, next_sunday
-
 
     base_data = {
         "service": context.service.value,
@@ -165,36 +177,6 @@ def show_week_overview(
 
     available_days = two_weeks.get("available_days") or []
 
-    if time_pref == "morning":
-        available_days = [d for d in available_days if d.get("morning")]
-    elif time_pref == "afternoon":
-        available_days = [d for d in available_days if d.get("afternoon")]
-
-    # Primi 3 giorni disponibili nel range richiesto
-    shown = available_days[:3]
-
-    context.conversation.current_step = ConversationStep.SEARCH_AVAILABILITY
-    context.conversation.pending_action = PendingAction.PROVIDE_DATE
-    context.offered_days = [
-        OfferedDay(option=i, date=date.fromisoformat(d["date"]), label=d["label"])
-        for i, d in enumerate(shown, start=1)
-    ]
-
-    return context, SystemResult(
-        success=True,
-        data={
-            "this_week": shown,          # riuso campo esistente per AI#2
-            "next_week": [],
-            "first_available": None,
-            "this_week_over": False,
-            "time_preference": time_pref,
-            "period": period,
-            "date_from": date_from.isoformat(),
-            "date_to": date_to.isoformat(),
-        },
-    )
-
-
     # Filtro fascia: tieni solo i giorni che hanno quella disponibilità.
     if time_pref == "morning":
         available_days = [d for d in available_days if d.get("morning")]
@@ -202,11 +184,22 @@ def show_week_overview(
         available_days = [d for d in available_days if d.get("afternoon")]
     # evening: l'engine espone solo morning/afternoon; non filtriamo qui.
 
-    this_week = [d for d in available_days if d["date"] <= this_sunday.isoformat()]
-    next_week = [d for d in available_days if d["date"] > this_sunday.isoformat()]
+    if explicit_range:
+        # Range custom (mese, inizio ottobre, ecc.): primi 3 giorni nel range.
+        shown = available_days[:3]
+        this_week_days: list = []
+        next_week_days: list = []
+        custom_days = shown
+        overview_mode = "custom_range"
+    else:
+        this_week_days = [d for d in available_days if d["date"] <= this_sunday.isoformat()]
+        next_week_days = [d for d in available_days if d["date"] > this_sunday.isoformat()]
+        shown = (this_week_days[:3] + next_week_days[:3]) if (this_week_days or next_week_days) else []
+        custom_days = []
+        overview_mode = "week"
 
     first_available = None
-    if not this_week and not next_week:
+    if not shown:
         try:
             wide = engine.search_available_days(
                 tenant, knowledge, {**base_data, "preferences": {}}, max_days=1
@@ -220,21 +213,24 @@ def show_week_overview(
     context.conversation.current_step = ConversationStep.SEARCH_AVAILABILITY
     context.conversation.pending_action = PendingAction.PROVIDE_DATE
 
-    shown_days = (this_week[:3] + next_week[:3]) if (this_week or next_week) else []
     context.offered_days = [
         OfferedDay(option=i, date=date.fromisoformat(d["date"]), label=d["label"])
-        for i, d in enumerate(shown_days, start=1)
+        for i, d in enumerate(shown, start=1)
     ]
 
     return context, SystemResult(
         success=True,
         data={
-            "this_week": this_week[:3],
-            "next_week": next_week[:3],
+            "this_week": this_week_days[:3],
+            "next_week": next_week_days[:3],
+            "custom_days": custom_days,
+            "overview_mode": overview_mode,
             "first_available": first_available,
             "this_week_over": _week_effectively_over(knowledge, tenant, today, this_sunday),
             "time_preference": time_pref,
             "period": period,
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
         },
     )
 
