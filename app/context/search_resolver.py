@@ -89,6 +89,57 @@ def _resolve_month_window(
     return date(year, m, 1), date(year, m, last)
 
 
+def _resolve_week_of_month_window(
+    month_name: str,
+    week_of_month: str | None,
+    today: date,
+) -> tuple[date, date] | None:
+    """
+    Traduce month + week_of_month ("1"|"2"|"3"|"4"|"last") in un range
+    di date. Alternativa a _resolve_month_window (start/mid/end/whole):
+    qui la granularita' e' la settimana, non il terzo di mese.
+
+    Policy (bande fisse di 7 giorni, stesso principio di semplicita' e
+    prevedibilita' usato per month_part - non calendario lun-dom, che
+    varierebbe in modo poco intuitivo a seconda del giorno con cui
+    inizia il mese):
+      1    → giorni 1-7
+      2    → giorni 8-14
+      3    → giorni 15-21
+      4    → giorni 22-28
+      last → ultimi 7 giorni del mese (last-6 → last), cosi' copre
+             correttamente sia mesi di 28 sia di 31 giorni.
+    Anno: stessa regola di _resolve_month_window (mese gia' alle spalle
+    → anno successivo).
+    """
+    m = _MONTHS.get((month_name or "").strip().lower())
+    if not m:
+        return None
+
+    week = (week_of_month or "").strip().lower()
+    if week not in {"1", "2", "3", "4", "last"}:
+        return None
+
+    year = today.year
+    first_of_month = date(year, m, 1)
+    if first_of_month < date(today.year, today.month, 1):
+        year += 1
+
+    last = _last_day_of_month(year, m)
+
+    if week == "last":
+        return date(year, m, max(1, last - 6)), date(year, m, last)
+
+    week_n = int(week)
+    start_day = (week_n - 1) * 7 + 1
+    end_day = week_n * 7
+    if start_day > last:
+        # settimana richiesta oltre la fine del mese (mese corto): non
+        # esiste, meglio non inventare un range vuoto/errato a valle.
+        return None
+    return date(year, m, start_day), date(year, m, min(end_day, last))
+
+
 _WEEKDAY_NAME_TO_ISO = {
     "lunedì": 1,
     "martedì": 2,
@@ -201,6 +252,47 @@ def resolve_search_criteria(
             updated.preferred_time = None
 
         return updated
+
+    # --- Mese esplicito + settimana ordinale ("seconda settimana di ottobre") ---
+    # Ha priorita' su month_part: sono due modi alternativi di restringere
+    # lo stesso mese, e week_of_month e' il piu' specifico dei due quando
+    # entrambi sono presenti (non dovrebbe succedere se l'AI segue il
+    # prompt, ma in caso di ambiguita' la settimana vince perche' e' il
+    # segnale piu' preciso che il cliente ha dato).
+    if entities.get("month") and entities.get("week_of_month"):
+        window = _resolve_week_of_month_window(
+            entities["month"],
+            entities.get("week_of_month"),
+            today,
+        )
+        if window:
+            from_date, to_date = window
+            updated.date_from = from_date
+            updated.date_to = to_date
+            updated.preferred_date = None
+            updated.period = None
+            updated.week_part = None
+            updated.preferred_weekday = None
+
+            if entities.get("time_preference"):
+                updated.time_preference = entities["time_preference"]
+            if entities.get("exact_time"):
+                updated.preferred_time = _parse_hhmm(entities["exact_time"])
+                updated.time_from = updated.time_to = None
+            elif updated.time_preference in _TIME_WINDOWS:
+                start_h, end_h = _TIME_WINDOWS[updated.time_preference]
+                updated.time_from = _hour(start_h)
+                updated.time_to = _hour(end_h)
+                updated.preferred_time = None
+
+            print(
+                f"[RESOLVER] month={entities.get('month')} "
+                f"week_of_month={entities.get('week_of_month')} → {from_date}..{to_date}"
+            )
+            return updated
+        # window None (es. settimana "4" richiesta su un mese troppo corto
+        # per contenerla): niente panico, si scende normalmente al ramo
+        # month_part qui sotto, che copre comunque il mese richiesto.
 
     # --- Mese esplicito (inizio/metà/fine/tutto) ---
     if entities.get("month"):
