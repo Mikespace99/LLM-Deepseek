@@ -1199,13 +1199,28 @@ def search_available_days(
       "result": {"success": True, "no_days": False}
     }
     """
-    # Ricerca ampia: ignoriamo preferenze temporali strette
+    # Ricerca ampia: ignoriamo preferenze temporali strette (weekday,
+    # period, fascia oraria), MA se il chiamante ha già fissato un range
+    # esplicito (es. show_week_overview per "inizio del mese prossimo" →
+    # 1-10 del mese), quel range va rispettato: è l'unico modo che la
+    # ricerca abbia senso per un mese/periodo specifico invece che
+    # "i prossimi N giorni liberi da oggi".
     wide = dict(collected_data or {})
     prefs = dict(wide.get("preferences") or {})
-    prefs["ignore_preferences"] = True
-    # Pulisce eventuali vincoli di giorno/periodo
-    for k in ("date", "date_from", "date_to", "period", "weekday", "week_part"):
+    has_explicit_range = bool(prefs.get("date_from") and prefs.get("date_to"))
+
+    if not has_explicit_range:
+        prefs["ignore_preferences"] = True
+
+    # Pulisce SEMPRE i vincoli stretti che non c'entrano con la
+    # panoramica giorni (giorno singolo, periodo a etichetta, weekday).
+    for k in ("date", "period", "weekday", "week_part"):
         prefs.pop(k, None)
+
+    if not has_explicit_range:
+        for k in ("date_from", "date_to"):
+            prefs.pop(k, None)
+
     wide["preferences"] = prefs
 
     ctx = _build_context(tenant, knowledge, wide)
