@@ -168,6 +168,48 @@ _TIME_WINDOWS = {
 }
 
 
+def _apply_time_or_reset(updated: SearchCriteria, entities: dict) -> None:
+    """
+    Usata SOLO quando il messaggio corrente porta un nuovo ambito di
+    data (mese, settimana del mese, period, data esplicita): in quel
+    caso la fascia oraria di un turno precedente NON va trascinata in
+    automatico su un ambito diverso da quello per cui era stata detta
+    ("pomeriggio" riferito a fine settembre non deve restare attaccato
+    quando il cliente chiede la prima settimana di ottobre - altrimenti
+    si rischia di filtrare via giorni realmente disponibili di mattina
+    e presentare un falso "nessuna disponibilità").
+
+    - Se il messaggio corrente specifica ESPLICITAMENTE una fascia
+      oraria o un orario esatto, quella vince (comportamento invariato).
+    - Altrimenti la fascia oraria precedente viene dimenticata: si
+      mostra la disponibilità di tutti i giorni del nuovo ambito, con
+      indicazione mattina/pomeriggio per ciascuno (se ne ha), invece di
+      restringere silenziosamente su una preferenza che il cliente non
+      ha ripetuto per questa nuova richiesta.
+    """
+    if entities.get("exact_time"):
+        updated.preferred_time = _parse_hhmm(entities["exact_time"])
+        updated.time_preference = "exact"
+        updated.time_from = updated.time_to = None
+        return
+
+    if entities.get("time_preference"):
+        updated.time_preference = entities["time_preference"]
+        if updated.time_preference in _TIME_WINDOWS:
+            start_h, end_h = _TIME_WINDOWS[updated.time_preference]
+            updated.time_from = _hour(start_h)
+            updated.time_to = _hour(end_h)
+            updated.preferred_time = None
+        return
+
+    # Nessuna fascia oraria nel messaggio corrente → si dimentica quella
+    # ereditata, non si trascina su un ambito di date diverso.
+    updated.time_preference = None
+    updated.time_from = None
+    updated.time_to = None
+    updated.preferred_time = None
+
+
 def _resolve_weekday_date(
     weekday_name: str,
     from_date: date,
@@ -284,21 +326,12 @@ def resolve_search_criteria(
             updated.period = None
             updated.week_part = None
             updated.preferred_weekday = None
-
-            if entities.get("time_preference"):
-                updated.time_preference = entities["time_preference"]
-            if entities.get("exact_time"):
-                updated.preferred_time = _parse_hhmm(entities["exact_time"])
-                updated.time_from = updated.time_to = None
-            elif updated.time_preference in _TIME_WINDOWS:
-                start_h, end_h = _TIME_WINDOWS[updated.time_preference]
-                updated.time_from = _hour(start_h)
-                updated.time_to = _hour(end_h)
-                updated.preferred_time = None
+            _apply_time_or_reset(updated, entities)
 
             print(
                 f"[RESOLVER] month={entities.get('month')} "
-                f"week_of_month={entities.get('week_of_month')} → {from_date}..{to_date}"
+                f"week_of_month={entities.get('week_of_month')} → {from_date}..{to_date} "
+                f"time_preference={updated.time_preference}"
             )
             return updated
         # window None (es. settimana "4" richiesta su un mese troppo corto
@@ -320,28 +353,27 @@ def resolve_search_criteria(
             updated.period = None
             updated.week_part = None
             updated.preferred_weekday = None
-
-            # fascia oraria se presente nel messaggio
-            if entities.get("time_preference"):
-                updated.time_preference = entities["time_preference"]
-            if entities.get("exact_time"):
-                updated.preferred_time = _parse_hhmm(entities["exact_time"])
-                updated.time_from = updated.time_to = None
-            elif updated.time_preference in _TIME_WINDOWS:
-                start_h, end_h = _TIME_WINDOWS[updated.time_preference]
-                updated.time_from = _hour(start_h)
-                updated.time_to = _hour(end_h)
-                updated.preferred_time = None
+            _apply_time_or_reset(updated, entities)
 
             print(
                 f"[RESOLVER] month={entities.get('month')} "
-                f"part={entities.get('month_part')} → {from_date}..{to_date}"
+                f"part={entities.get('month_part')} → {from_date}..{to_date} "
+                f"time_preference={updated.time_preference}"
             )
             return updated
 
 
   
     # --- 1. Aggiorna le etichette grezze, solo se il messaggio le porta ---
+    # new_date_scope: un NUOVO ambito di data a se stante (non un
+    # affinamento di quello gia' attivo). E' il segnale che decide se la
+    # fascia oraria precedente va dimenticata (vedi _apply_time_or_reset):
+    # un nuovo "period" esplicito o una data assoluta cambiano l'ambito;
+    # "weekday" o "week_part" da soli restano un dettaglio dentro
+    # l'ambito gia' stabilito (es. "prossima settimana" -> "mercoledì"),
+    # quindi non azzerano la fascia oraria.
+    new_date_scope = bool(entities.get("period")) or bool(entities.get("date_from"))
+
     if entities.get("period"):
         updated.period = entities["period"]
         # un nuovo period esplicito azzera un week_part di un periodo diverso
@@ -351,9 +383,6 @@ def resolve_search_criteria(
 
     if entities.get("weekday"):
         updated.preferred_weekday = normalize_weekday(entities["weekday"]) or entities["weekday"]
-
-    if entities.get("time_preference"):
-        updated.time_preference = entities["time_preference"]
 
     # Una data assoluta esplicita ("il 15 settembre") sovrascrive period/weekday:
     # e' un nuovo vincolo piu' specifico, non un dettaglio aggiuntivo.
@@ -365,6 +394,11 @@ def resolve_search_criteria(
         updated.period = None
         updated.week_part = None
         updated.preferred_weekday = None
+
+    if new_date_scope:
+        _apply_time_or_reset(updated, entities)
+    elif entities.get("time_preference"):
+        updated.time_preference = entities["time_preference"]
 
     # --- 2. Se c'e' una data assoluta esplicita, la finestra e' gia' definita ---
     if explicit_date_from:
