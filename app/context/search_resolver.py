@@ -21,6 +21,7 @@ time_preference), SOLO questo modulo calcola le date esatte.
 
 from __future__ import annotations
 
+import calendar
 from datetime import date, timedelta
 
 from app.context.models import SearchCriteria
@@ -95,29 +96,38 @@ def _resolve_week_of_month_window(
     today: date,
 ) -> tuple[date, date] | None:
     """
-    Traduce month + week_of_month ("1"|"2"|"3"|"4"|"last") in un range
-    di date. Alternativa a _resolve_month_window (start/mid/end/whole):
-    qui la granularita' e' la settimana, non il terzo di mese.
+    Traduce month + week_of_month ("1".."5"|"last") in un range di date
+    che corrisponde alla VERA riga del calendario (lunedi'-domenica,
+    come lo vede il cliente su un calendario cartaceo o Google Calendar),
+    non a un conteggio artificiale di 7 giorni dal primo del mese.
 
-    Policy (bande fisse di 7 giorni, stesso principio di semplicita' e
-    prevedibilita' usato per month_part - non calendario lun-dom, che
-    varierebbe in modo poco intuitivo a seconda del giorno con cui
-    inizia il mese):
-      1    → giorni 1-7
-      2    → giorni 8-14
-      3    → giorni 15-21
-      4    → giorni 22-28
-      last → ultimi 7 giorni del mese (last-6 → last), cosi' copre
-             correttamente sia mesi di 28 sia di 31 giorni.
-    Anno: stessa regola di _resolve_month_window (mese gia' alle spalle
-    → anno successivo).
+    Percio':
+    - la "prima settimana" e' spesso corta (puo' essere anche un solo
+      giorno, se il mese inizia di domenica): va dal giorno 1 fino alla
+      domenica successiva compresa;
+    - le settimane intermedie sono righe piene lunedi'-domenica;
+    - l'"ultima settimana" e' quella che resta fino a fine mese, anche
+      questa spesso corta;
+    - un mese puo' avere da 4 a 6 righe a seconda di come cadono inizio
+      e fine mese: se viene chiesta una settimana numerata che quel mese
+      non ha (es. "quinta settimana" in un mese con solo 4 righe), si
+      restituisce l'ULTIMA riga disponibile invece di un range vuoto o
+      inventato - e' la scelta piu' ragionevole ("la settimana che
+      chiedi non esiste separatamente, ti mostro l'ultima del mese").
+
+    calendar.monthcalendar fa il calcolo esatto (giorno della settimana
+    del primo del mese, numero di giorni del mese, anni bisestili) in
+    modo identico per qualunque anno passato o futuro: non c'e' nulla
+    di specifico al 2026 o a un anno in particolare, e' pura aritmetica
+    di calendario gregoriano ricalcolata ogni volta dai parametri
+    (year, m) ricevuti in input.
     """
     m = _MONTHS.get((month_name or "").strip().lower())
     if not m:
         return None
 
     week = (week_of_month or "").strip().lower()
-    if week not in {"1", "2", "3", "4", "last"}:
+    if week not in {"1", "2", "3", "4", "5", "last"}:
         return None
 
     year = today.year
@@ -125,19 +135,20 @@ def _resolve_week_of_month_window(
     if first_of_month < date(today.year, today.month, 1):
         year += 1
 
-    last = _last_day_of_month(year, m)
+    # Una "riga" per ogni settimana lunedi'-domenica che il mese tocca;
+    # i giorni non appartenenti al mese sono marcati con 0 da monthcalendar.
+    rows = calendar.monthcalendar(year, m)
 
     if week == "last":
-        return date(year, m, max(1, last - 6)), date(year, m, last)
+        row = rows[-1]
+    else:
+        idx = int(week) - 1
+        row = rows[idx] if idx < len(rows) else rows[-1]
 
-    week_n = int(week)
-    start_day = (week_n - 1) * 7 + 1
-    end_day = week_n * 7
-    if start_day > last:
-        # settimana richiesta oltre la fine del mese (mese corto): non
-        # esiste, meglio non inventare un range vuoto/errato a valle.
+    days_in_row = [d for d in row if d != 0]
+    if not days_in_row:
         return None
-    return date(year, m, start_day), date(year, m, min(end_day, last))
+    return date(year, m, days_in_row[0]), date(year, m, days_in_row[-1])
 
 
 _WEEKDAY_NAME_TO_ISO = {
