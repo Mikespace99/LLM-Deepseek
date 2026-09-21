@@ -27,6 +27,7 @@ from app.flows.common import (
     find_selected_offered_slot,
     has_search_criteria,
     offered_slot_to_engine_dict,
+    reject_offered_slots,
     reset_for_new_operation,
     run_availability_search,
 )
@@ -326,11 +327,12 @@ def confirm(
 
 
 def reject_confirmation(context: ConversationContext, **_ignored) -> tuple[ConversationContext, SystemResult]:
-    """Intent REJECT -> torna a proporre gli slot già trovati."""
-    context = context.model_copy(deep=True)
-    context.booking.slot_id = None
-    context.confirmation.required = False
-    context.confirmation.status = None
-    context.conversation.current_step = ConversationStep.WAITING_FOR_SLOT
-    context.conversation.pending_action = PendingAction.NONE
-    return context, SystemResult(success=True, data={"next": "reask_slot"})
+    """
+    Intent REJECT durante la conferma finale ("le va bene lunedì alle
+    10?" -> "no"): stesso trattamento del rifiuto di una lista di slot
+    (reject_offered_slots) - lo slot rifiutato va in blacklist, l'offerta
+    corrente viene svuotata, e si chiedono nuove preferenze fermandosi
+    lì. PRIMA (bug) si riproponevano automaticamente gli stessi slot già
+    rifiutati invece di aspettare la risposta del cliente.
+    """
+    return reject_offered_slots(context)
