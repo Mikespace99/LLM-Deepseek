@@ -198,8 +198,19 @@ def show_week_overview(
         custom_days = []
         overview_mode = "week"
 
+    # Una ricerca e' "vincolata" quando il cliente ha chiesto qualcosa di
+    # specifico (un mese/settimana esplicito, oppure proprio "questa" o
+    # "la prossima settimana"): in quel caso, se non troviamo nulla, va
+    # detto onestamente - NON si sostituisce silenziosamente con il primo
+    # giorno libero in assoluto (che potrebbe non c'entrare nulla con la
+    # fascia oraria o il periodo richiesti, e darebbe l'impressione di
+    # una risposta inventata). Il fallback "prima disponibilita assoluta"
+    # resta valido SOLO per la ricerca davvero aperta (nessun periodo
+    # specifico chiesto).
+    constrained_search = explicit_range or period in ("this_week", "next_week")
+
     first_available = None
-    if not shown:
+    if not shown and not constrained_search:
         try:
             wide = engine.search_available_days(
                 tenant, knowledge, {**base_data, "preferences": {}}, max_days=1
