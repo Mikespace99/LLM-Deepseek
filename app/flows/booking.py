@@ -79,22 +79,21 @@ def start_search(
     tenant: dict,
     knowledge: dict,
 ) -> tuple[ConversationContext, SystemResult]:
-    """
-    Intent BOOK/CHANGE_PREFERENCE -> se il cliente ha già indicato un
-    criterio, cerca direttamente. Altrimenti, invece di chiedere
-    genericamente "quando vorrebbe?", gli mostriamo cosa c'è già
-    disponibile (questa settimana / la prossima), così sceglie da una
-    base concreta invece di dover indovinare cosa rispondere.
-    """
     if context.conversation.current_step == ConversationStep.COMPLETED:
-        # Richiesta nuova dopo una prenotazione già conclusa: si
-        # riparte puliti, senza criteri/slot della volta precedente.
         context = reset_for_new_operation(context)
 
-    if has_search_criteria(context):
-        return run_availability_search(context, tenant, knowledge)
-    return show_week_overview(context, tenant, knowledge)
+    s = context.search
 
+    # Giorno singolo già ancorato → vai agli orari
+    single_day = (
+        s.preferred_date is not None
+        or (s.date_from is not None and s.date_to is not None and s.date_from == s.date_to)
+    )
+    if single_day:
+        return run_availability_search(context, tenant, knowledge)
+
+    # Range, settimana, mese, o nessun criterio → panoramica giorni
+    return show_week_overview(context, tenant, knowledge)
 
 def show_week_overview(
     context: ConversationContext,
@@ -118,8 +117,19 @@ def show_week_overview(
     period = context.search.period
     time_pref = context.search.time_preference  # morning | afternoon | evening | None
 
-    # Finestra date in base al periodo richiesto (se c'è).
-    if period == "next_week":
+
+    period = context.search.period
+    time_pref = context.search.time_preference
+
+    # Se il resolver ha già fissato un range (es. inizio ottobre), usalo.
+    if (
+        context.search.date_from
+        and context.search.date_to
+        and context.search.date_from != context.search.date_to
+    ):
+        date_from = max(context.search.date_from, today)
+        date_to = context.search.date_to
+    elif period == "next_week":
         date_from, date_to = next_monday, next_sunday
     elif period == "this_week":
         date_from, date_to = today, this_sunday
@@ -128,8 +138,8 @@ def show_week_overview(
     elif period == "tomorrow":
         date_from = date_to = today + timedelta(days=1)
     else:
-        # Nessun periodo o "any": panoramica su questa + prossima settimana.
         date_from, date_to = today, next_sunday
+
 
     base_data = {
         "service": context.service.value,
@@ -154,6 +164,36 @@ def show_week_overview(
         return context, SystemResult(success=False, error_code="TECHNICAL_ERROR")
 
     available_days = two_weeks.get("available_days") or []
+
+    if time_pref == "morning":
+        available_days = [d for d in available_days if d.get("morning")]
+    elif time_pref == "afternoon":
+        available_days = [d for d in available_days if d.get("afternoon")]
+
+    # Primi 3 giorni disponibili nel range richiesto
+    shown = available_days[:3]
+
+    context.conversation.current_step = ConversationStep.SEARCH_AVAILABILITY
+    context.conversation.pending_action = PendingAction.PROVIDE_DATE
+    context.offered_days = [
+        OfferedDay(option=i, date=date.fromisoformat(d["date"]), label=d["label"])
+        for i, d in enumerate(shown, start=1)
+    ]
+
+    return context, SystemResult(
+        success=True,
+        data={
+            "this_week": shown,          # riuso campo esistente per AI#2
+            "next_week": [],
+            "first_available": None,
+            "this_week_over": False,
+            "time_preference": time_pref,
+            "period": period,
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+        },
+    )
+
 
     # Filtro fascia: tieni solo i giorni che hanno quella disponibilità.
     if time_pref == "morning":
