@@ -51,7 +51,7 @@ Restituisci TASSATIVAMENTE ed ESCLUSIVAMENTE un JSON con questa struttura:
     "month": "gennaio" | "febbraio" | "marzo" | "aprile" | "maggio" | "giugno" |
              "luglio" | "agosto" | "settembre" | "ottobre" | "novembre" | "dicembre" | null,
     "month_part": "start" | "mid" | "end" | "whole" | null,
-    "week_of_month": "1" | "2" | "3" | "4" | "last" | null,
+    "week_of_month": "1" | "2" | "3" | "4" | "5" | "last" | null,
     "date_from": "YYYY-MM-DD" | null,
     "date_to": "YYYY-MM-DD" | null,
     "time_preference": "morning" | "afternoon" | "evening" | "exact" | null,
@@ -200,9 +200,13 @@ LINEE GUIDA DI CLASSIFICAZIONE:
     - valorizza "month" come al punto 14 (nome del mese in italiano minuscolo;
       se dice "del mese prossimo"/"questo mese" calcola il mese come al punto 14)
     - valorizza "week_of_month" con l'ordinale: "prima"→"1", "seconda"→"2",
-      "terza"→"3", "quarta"→"4", "ultima"/"ultima settimana"→"last"
+      "terza"→"3", "quarta"→"4", "quinta"→"5", "ultima"/"ultima settimana"→"last"
     - lascia "month_part" a null quando usi "week_of_month" (sono alternativi,
       non si combinano)
+    - NON calcolare tu i giorni esatti della settimana: limitati all'ordinale.
+      E' Python a sapere che settimana lunedi'-domenica del calendario reale
+      corrisponde a "seconda settimana di ottobre" (che puo' NON essere
+      giorni 8-14: dipende da che giorno cade il primo del mese).
     - lascia date_from/date_to a null: le date le calcola Python
     - intent normalmente BOOK o CHANGE_PREFERENCE come da altre regole
 
