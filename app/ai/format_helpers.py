@@ -131,6 +131,33 @@ def _period_text(day: dict) -> str:
 def _format_day_with_period(day: dict) -> str:
     period_text = _period_text(day)
     return f"{day['label']} ({period_text})" if period_text else day["label"]
+
+
+def _format_date_range_it(date_from_iso: str | None, date_to_iso: str | None) -> str:
+    """
+    Formatta un range ISO in una frase italiana leggibile, per i
+    messaggi di "nessuna disponibilità nel periodo richiesto" - così il
+    cliente capisce ESATTAMENTE quale periodo abbiamo controllato,
+    invece di un generico "nel periodo richiesto".
+    Es: stesso giorno -> "3 ottobre"; stesso mese -> "1-4 ottobre";
+    mesi diversi -> "28 settembre - 4 ottobre".
+    """
+    if not date_from_iso or not date_to_iso:
+        return "nel periodo richiesto"
+
+    d_from = date.fromisoformat(date_from_iso)
+    d_to = date.fromisoformat(date_to_iso)
+
+    if d_from == d_to:
+        return f"il {d_from.day} {ITALIAN_MONTHS[d_from.month - 1]}"
+    if d_from.month == d_to.month and d_from.year == d_to.year:
+        return f"il {d_from.day}-{d_to.day} {ITALIAN_MONTHS[d_from.month - 1]}"
+    return (
+        f"il {d_from.day} {ITALIAN_MONTHS[d_from.month - 1]} "
+        f"- {d_to.day} {ITALIAN_MONTHS[d_to.month - 1]}"
+    )
+
+
 def format_week_overview(data: dict, today: date) -> list[str]:
     """
     Panoramica di disponibilità, come SEQUENZA di messaggi.
@@ -167,14 +194,19 @@ def format_week_overview(data: dict, today: date) -> list[str]:
     # --- Range custom (es. inizio ottobre, un mese, ecc.) ---
     if overview_mode == "custom_range":
         if not custom_days:
+            range_label = _format_date_range_it(data.get("date_from"), data.get("date_to"))
             if first_available:
+                # Ricerca aperta senza esito nel range: qui first_available
+                # e' comunque valorizzato solo quando la ricerca non era
+                # vincolata a un periodo specifico (vedi flows/booking.py).
                 return [
-                    "Nel periodo richiesto non ci sono disponibilità. "
+                    f"Per {range_label} non ci sono disponibilità. "
                     f"La prima disponibilità che ho trovato è {_format_day_with_period(first_available)}."
                 ]
             return [
-                "Nel periodo richiesto non risultano disponibilità. "
-                "La invito a contattare direttamente lo studio."
+                f"Per {range_label} al momento non risultano disponibilità. "
+                "Vuole che guardi la settimana successiva, o preferisce che allarghi la ricerca "
+                "a un periodo diverso?"
             ]
         lines = "\n".join(_day_line(d, use_relative=False) for d in custom_days)
         if band_it:
@@ -193,7 +225,20 @@ def format_week_overview(data: dict, today: date) -> list[str]:
 
     # --- Modalità settimana (this / next) ---
     if not this_week and not next_week:
+        period = data.get("period")
+        if period == "next_week":
+            return [
+                "Per la prossima settimana al momento non risultano disponibilità. "
+                "Vuole che guardi la settimana successiva, o preferisce che allarghi la ricerca?"
+            ]
+        if period == "this_week":
+            return [
+                "Per questa settimana al momento non risultano disponibilità. "
+                "Vuole che guardi la settimana prossima, o preferisce che allarghi la ricerca?"
+            ]
         if first_available:
+            # Ricerca aperta (nessun periodo specifico richiesto): qui ha
+            # senso proporre la prima disponibilità assoluta come fallback.
             return [
                 "Al momento non ci sono disponibilità nelle prossime due settimane. "
                 f"La prima disponibilità che ho trovato è {_format_day_with_period(first_available)}."
