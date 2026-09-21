@@ -36,6 +36,7 @@ from app.flows.common import (
     build_search_collected_data,
     find_selected_offered_slot,
     offered_slot_to_engine_dict,
+    reject_offered_slots,
     reset_for_new_operation,
     search_or_ask_preference,
 )
@@ -240,9 +241,9 @@ def reject_confirmation(context: ConversationContext, **_ignored) -> tuple[Conve
         context.conversation.pending_action = PendingAction.NONE
         return context, SystemResult(success=False, error_code="RESCHEDULE_TARGET_REJECTED")
 
-    context.booking.slot_id = None
-    context.confirmation.required = False
-    context.confirmation.status = None
-    context.conversation.current_step = ConversationStep.WAITING_FOR_SLOT
-    context.conversation.pending_action = PendingAction.NONE
-    return context, SystemResult(success=True, data={"next": "reask_slot"})
+    # Ha rifiutato il nuovo slot proposto: stesso trattamento del rifiuto
+    # di una lista di slot (reject_offered_slots) - blacklist, offerta
+    # svuotata, si chiedono nuove preferenze e ci si ferma lì. PRIMA (bug)
+    # si riproponevano gli stessi slot già rifiutati invece di aspettare
+    # la risposta del cliente.
+    return reject_offered_slots(context)
