@@ -51,6 +51,7 @@ Restituisci TASSATIVAMENTE ed ESCLUSIVAMENTE un JSON con questa struttura:
     "month": "gennaio" | "febbraio" | "marzo" | "aprile" | "maggio" | "giugno" |
              "luglio" | "agosto" | "settembre" | "ottobre" | "novembre" | "dicembre" | null,
     "month_part": "start" | "mid" | "end" | "whole" | null,
+    "week_of_month": "1" | "2" | "3" | "4" | "last" | null,
     "date_from": "YYYY-MM-DD" | null,
     "date_to": "YYYY-MM-DD" | null,
     "time_preference": "morning" | "afternoon" | "evening" | "exact" | null,
@@ -68,9 +69,9 @@ Restituisci TASSATIVAMENTE ed ESCLUSIVAMENTE un JSON con questa struttura:
 
 REGOLA FONDAMENTALE - NON FARE MAI CALCOLI DI CALENDARIO:
 Non devi MAI calcolare a mente una data relativa. Riconosci e classifica soltanto,
-usando le etichette categoriche (period / weekday / week_part / month / month_part).
-Sara' un componente Python deterministico, con la vera data di oggi ("oggi_iso" nel payload),
-a tradurre queste etichette in date esatte.
+usando le etichette categoriche (period / weekday / week_part / month / month_part /
+week_of_month). Sara' un componente Python deterministico, con la vera data di oggi
+("oggi_iso" nel payload), a tradurre queste etichette in date esatte.
 Usa "date_from"/"date_to" SOLO se il cliente ha gia' detto per intero una data assoluta
 esplicita (es. "il 15 settembre" oppure "dal 3 al 5 ottobre"): in quel caso limitati a
 TRASCRIVERE quella data in formato YYYY-MM-DD, senza alcuna deduzione.
@@ -191,6 +192,38 @@ LINEE GUIDA DI CLASSIFICAZIONE:
       → period="this_week", month=null, month_part=null
 
     Se nel messaggio c'è un nome di mese, è VIETATO usare period=this_week o next_week.
+
+14bis. SETTIMANA N-ESIMA DI UN MESE:
+    Se il cliente indica una settimana ordinale legata a un mese specifico
+    ("prima settimana di ottobre", "seconda settimana del mese prossimo",
+    "ultima settimana di settembre", "la terza settimana di novembre"):
+    - valorizza "month" come al punto 14 (nome del mese in italiano minuscolo;
+      se dice "del mese prossimo"/"questo mese" calcola il mese come al punto 14)
+    - valorizza "week_of_month" con l'ordinale: "prima"→"1", "seconda"→"2",
+      "terza"→"3", "quarta"→"4", "ultima"/"ultima settimana"→"last"
+    - lascia "month_part" a null quando usi "week_of_month" (sono alternativi,
+      non si combinano)
+    - lascia date_from/date_to a null: le date le calcola Python
+    - intent normalmente BOOK o CHANGE_PREFERENCE come da altre regole
+
+    ESEMPI OBBLIGATORI (settimana del mese) — segui esattamente questo schema:
+    - "prima settimana di ottobre" / "la prima settimana di ottobre"
+      → month="ottobre", week_of_month="1", month_part=null, period=null
+    - "seconda settimana di ottobre"
+      → month="ottobre", week_of_month="2", month_part=null, period=null
+    - "ultima settimana di settembre" / "l'ultima settimana di settembre"
+      → month="settembre", week_of_month="last", month_part=null, period=null
+    - "prima settimana del mese prossimo"
+      → calcola il mese successivo a oggi_iso come al punto 14, valorizza quel
+        month + week_of_month="1", month_part=null, period=null
+    - "terza settimana di questo mese"
+      → month = mese di oggi_iso, week_of_month="3", month_part=null, period=null
+
+    Una settimana ordinale SENZA nome di mese esplicito o implicito ("questo"/
+    "prossimo" mese) non è coperta da questa regola: se il cliente dice solo
+    "la prossima settimana" senza altro, resta il caso period="next_week" del
+    punto 14 (week_part eventualmente per la parte della settimana, non
+    week_of_month che serve solo insieme a un mese).
 
 Rispondi solo con il JSON, nessun testo di contorno.
 """.strip()
