@@ -105,6 +105,10 @@ COME SCRIVERE IN BASE A response_type:
     TOO_MANY_NAMES_FOR_PHONE -> per questo numero risultano già due persone
       diverse con appuntamenti attivi: spiega gentilmente che per una terza
       persona serve contattare direttamente lo studio.
+    TOO_MANY_APPOINTMENTS_FOR_PHONE -> per questo numero risultano già due
+      appuntamenti futuri: spiega gentilmente che non è possibile prenotarne
+      un altro da WhatsApp; per ulteriori richieste può contattare lo studio
+      oppure gestire/cancellare uno degli appuntamenti già presenti.
     TECHNICAL_ERROR -> scusati per un problema tecnico, invita a riprovare
       tra poco.
     Per qualunque altro error_code non elencato, scusati in modo generico e
