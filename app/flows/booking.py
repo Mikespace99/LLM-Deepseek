@@ -31,6 +31,7 @@ from app.flows.common import (
     reset_for_new_operation,
     run_availability_search,
 )
+from app.repositories import appointment as appointment_repo
 from app.utils.it_dates import today_in_tz
 from app.web.sse import notify_agenda
 
@@ -86,9 +87,37 @@ def start_search(
     giorno singolo (o un weekday), cerca gli orari. Altrimenti (range,
     settimana, mese, nessun criterio) mostra la panoramica giorni con
     fasce orarie, così sceglie da una base concreta.
+
+    Prima di qualsiasi ricerca: se questo numero ha già 2 appuntamenti
+    confirmed e futuri, blocca subito (solo prenotazione nuova).
     """
     if context.conversation.current_step == ConversationStep.COMPLETED:
         context = reset_for_new_operation(context)
+
+    # Max 2 appuntamenti futuri per numero: solo su BOOK, prima di cercare.
+    customer_id = context.customer.id
+    if customer_id:
+        try:
+            upcoming = appointment_repo.list_upcoming_for_customer(
+                tenant["id"],
+                customer_id,
+                limit=10,
+                tz_name=tenant.get("timezone"),
+            )
+        except Exception as exc:
+            print(f"[flows.booking.start_search] errore conteggio appuntamenti: {exc!r}")
+            upcoming = []
+
+        if len(upcoming) >= 2:
+            context = reset_for_new_operation(context)
+            context.conversation.current_step = ConversationStep.IDLE
+            context.conversation.pending_action = PendingAction.NONE
+            context.operation = Operation()
+            return context, SystemResult(
+                success=False,
+                error_code="TOO_MANY_APPOINTMENTS_FOR_PHONE",
+                data={"upcoming_count": len(upcoming)},
+            )
 
     s = context.search
 
